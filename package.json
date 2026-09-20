@@ -1,0 +1,22 @@
+{
+  "name": "rahra-painel-online",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "db:setup": "node scripts/setup-db.mjs",
+    "test": "node test/core.test.mjs && node test/e2e.mjs"
+  },
+  "dependencies": {
+    "@clerk/backend": "^2.0.0",
+    "@neondatabase/serverless": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.0",
+    "puppeteer-core": "^25.11.0"
+  }
+}
