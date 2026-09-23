@@ -107,25 +107,54 @@ try {
   assert.equal(await p.$eval('.tab[aria-selected=true]', e => e.textContent), 'Cadastros', 'banco vazio abre em Cadastros');
   ok('e-mail do admin entra como administrador e vê todas as abas');
 
+  await p.click('[data-act=edit][data-key=cons]');
   await p.type('#nc-name', 'Ana Paula'); await p.click('[data-act=add-cons]');
   await p.type('#nc-name', 'Beatriz'); await p.click('[data-act=add-cons]');
+  await p.click('[data-act=save-edit][data-key=cons]');
+  await saved(p, 'salvou consultoras');
+
+  await p.click('[data-act=edit][data-key=weeks]');
   await p.click('[data-act=add-week]');
   const wg = await p.$$('input[data-b^="wg:"]');
   await wg[0].focus(); await p.keyboard.type('5000'); await p.keyboard.press('Tab');
   await wg[1].focus(); await p.keyboard.type('4000'); await p.keyboard.press('Tab');
-  await saved(p, 'salvou cadastros');
+  await p.click('[data-act=save-edit][data-key=weeks]');
+  await saved(p, 'salvou semanas e metas');
   const rows = (await db.query('select name, goal::float8 as goal from consultants order by position')).rows;
   assert.deepEqual(rows, [{ name: 'Ana Paula', goal: 0 }, { name: 'Beatriz', goal: 0 }]);
   assert.equal((await db.query('select count(*)::int as n from weeks')).rows[0].n, 1);
   assert.deepEqual((await db.query('select goal::float8 as goal from week_goals order by goal')).rows, [{ goal: 4000 }, { goal: 5000 }]);
-  ok('cadastros vão para o banco (consultoras, semana e metas por semana)');
+  ok('cadastros vão para o banco (consultoras, semana e metas por semana) só depois de Salvar');
 
   await p.click('.tab[data-v=sem]');
+  await p.click('[data-act=edit][data-key=ent]');
   const fat = await p.$('#grid input[data-b$=":fat"]');
   await fat.focus(); await p.keyboard.type('1.234,5'); await p.keyboard.press('Tab');
+  await p.click('[data-act=save-edit][data-key=ent]');
   await saved(p, 'salvou lançamento');
   assert.deepEqual((await db.query('select fat::float8 as fat, updated_by from entries')).rows, [{ fat: 1234.5, updated_by: ADMIN.email }]);
   ok('lançamento vai para o banco só como a célula alterada, com autor');
+
+  await p.click('[data-act=edit][data-key=ent]');
+  const fat2 = await p.$('#grid input[data-b$=":fat"]');
+  await fat2.focus(); await p.keyboard.down('Control'); await p.keyboard.press('a'); await p.keyboard.up('Control'); await p.keyboard.type('9999'); await p.keyboard.press('Tab');
+  await p.click('[data-act=cancel-edit][data-key=ent]');
+  await until(p, () => /canceladas/i.test(document.querySelector('#toast').textContent), 'aviso de cancelamento');
+  assert.equal(await p.$eval('#grid input[data-b$=":fat"]', e => e.value), '1234,50', 'cancelar devolve o valor de antes da edição');
+  assert.deepEqual((await db.query('select fat::float8 as fat from entries')).rows, [{ fat: 1234.5 }]);
+  ok('cancelar uma edição de lançamento descarta o que foi digitado, sem gravar no banco');
+
+  await p.click('.tab[data-v=rel]');
+  await until(p, () => document.querySelector('#rep'), 'relatório carregou');
+  const repBefore = await p.$eval('#rep', e => e.textContent);
+  assert.equal(await p.$eval('[data-act=rep-cancel]', e => e.disabled), true, 'sem filtro pendente, Cancelar começa desabilitado');
+  await p.click('[data-act=rind][data-v=pa]');
+  assert.equal(await p.$eval('#rep', e => e.textContent), repBefore, 'trocar o filtro não muda o relatório antes de clicar em Gerar relatório');
+  assert.equal(await p.$eval('[data-act=rep-cancel]', e => e.disabled), false, 'com filtro pendente, Cancelar fica disponível');
+  await p.click('[data-act=rep-gen]');
+  await p.waitForFunction(before => document.querySelector('#rep').textContent !== before, {}, repBefore);
+  assert.equal(await p.$eval('[data-act=rep-cancel]', e => e.disabled), true, 'depois de gerar, Cancelar volta a ficar desabilitado');
+  ok('relatório só atualiza depois de clicar em "Gerar relatório"');
 
   await p.reload();
   await loaded(p, 'recarregou');
@@ -166,15 +195,18 @@ try {
   assert.deepEqual(await tabs(ed), ['Painel', 'Semanal', 'Mensal', 'Relatórios']);
   await ed.click('.tab[data-v=sem]');
   assert.equal(await ed.$eval('#grid input[data-b$=":fat"]', e => e.value), '1234,50', 'vê o que o admin lançou');
+  await ed.click('[data-act=edit][data-key=ent]');
   const tm = (await ed.$$('#grid input[data-b$=":tm"]'))[1];
   await tm.focus(); await ed.keyboard.type('180'); await ed.keyboard.press('Tab');
+  await ed.click('[data-act=save-edit][data-key=ent]');
   await saved(ed, 'editor salvou');
   assert.equal((await db.query('select updated_by from entries where tm is not null')).rows[0].updated_by, ED.email);
   await ed.click('.tab[data-v=men]');
-  assert.equal(await ed.$$eval('#mgrid input[data-b^="mg:"]', a => a.length > 0 && a.every(i => i.disabled)), true);
+  assert.equal(await ed.$$eval('#mgrid input', a => a.length), 0, 'meta do mês agora é só a soma das metas semanais, sem campo para editar');
+  assert.equal(await ed.$eval('#mgrid tbody tr td.goal', e => e.textContent.replace(/\s/g, ' ')), 'R$ 5.000', 'meta do mês de Ana Paula = soma das metas semanais dela');
   assert.equal(await fetchAs(ed, '/api/state', { method: 'PUT', body: '{}' }), 403);
   assert.equal(await fetchAs(ed, '/api/users'), 403);
-  ok('editor lança valores, não vê Cadastros/Usuários, metas travadas e a API recusa o resto');
+  ok('editor lança valores, não vê Cadastros/Usuários, meta do mês é só leitura e a API recusa o resto');
   await ed.close();
 
   const vw = await openAs(VW);
@@ -193,10 +225,14 @@ try {
   await loaded(b, 'aba b'); await b.click('.tab[data-v=cad]');
   const NAME = 'input[data-b^="c:"][data-b$=":name"]';
   await a.bringToFront();
+  await a.click('[data-act=edit][data-key=cons]');
   const i1 = await a.$(NAME); await i1.focus(); await a.keyboard.down('Control'); await a.keyboard.press('a'); await a.keyboard.up('Control'); await i1.type('Ana A'); await a.keyboard.press('Tab');
+  await a.click('[data-act=save-edit][data-key=cons]');
   await saved(a, 'a salvou');
   await b.bringToFront();
+  await b.click('[data-act=edit][data-key=cons]');
   const i2 = await b.$(NAME); await i2.focus(); await b.keyboard.down('Control'); await b.keyboard.press('a'); await b.keyboard.up('Control'); await i2.type('Ana B'); await b.keyboard.press('Tab');
+  await b.click('[data-act=save-edit][data-key=cons]');
   await until(b, () => /outra pessoa/i.test(document.querySelector('#toast').textContent), 'aviso de conflito');
   assert.equal((await db.query('select name from consultants order by position limit 1')).rows[0].name, 'Ana A');
   await until(b, () => document.querySelector('input[data-b^="c:"][data-b$=":name"]').value === 'Ana A', 'b recarregou');

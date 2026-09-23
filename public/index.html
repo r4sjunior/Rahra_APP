@@ -382,7 +382,6 @@ const cellVal=(w,c,k)=>{const e=ent(w,c);return e&&nn(e[k])!=null?+e[k]:null;};
 
 /* Estrutura (consultoras, semanas, metas): só o admin grava. Lançamentos: por célula (admin e editor). */
 function save(){if(!can.structure())return false;dirtyS=true;queueFlush();return true;}
-function saveSoon(){save();}
 function saveFull(){fullNext=true;save();}
 function markCell(w,c,k){dirtyCells.add(w+'|'+c+'|'+k);queueFlush();}
 function queueFlush(ms){setSync('Salvando…','busy');clearTimeout(flushT);flushT=setTimeout(flush,ms==null?700:ms);}
@@ -397,8 +396,8 @@ async function pull(){
   });
 }
 async function flush(){
-  if(flushing){queueFlush(400);return;}
-  flushing=true;let retry=false;
+  if(flushing){queueFlush(400);return 'busy';}
+  flushing=true;let retry=false,result='ok';
   try{
     if(dirtyS){ /* estrutura primeiro: uma semana nova precisa existir no banco antes dos seus lançamentos */
       const full=fullNext;dirtyS=false;fullNext=false;
@@ -407,7 +406,7 @@ async function flush(){
         const r=await api('/api/state',{method:'PUT',body:{version:SERVER_V,state:st,replaceEntries:full}});
         SERVER_V=r.version;
       }catch(e){
-        if(e.status===409){await pull();dirtyCells.clear();render();toast('Outra pessoa alterou os cadastros ao mesmo tempo. Recarreguei os dados: repita a sua última alteração.');}
+        if(e.status===409){await pull();dirtyCells.clear();render();toast('Outra pessoa alterou os cadastros ao mesmo tempo. Recarreguei os dados: repita a sua última alteração.');result='conflict';}
         else{dirtyS=true;fullNext=fullNext||full;throw e;}
       }
     }
@@ -426,9 +425,11 @@ async function flush(){
       /* recusado de vez (permissão, dado inválido): não adianta tentar de novo */
       dirtyS=false;dirtyCells.clear();setSync('Não salvou','bad');toast(e.message);
       pull().then(()=>render()).catch(()=>{});
-    }else{setSync('Sem conexão. Tentando de novo…','bad');retry=true;}
+      result='error';
+    }else{setSync('Sem conexão. Tentando de novo…','bad');retry=true;result='retry';}
   }finally{flushing=false;}
   if(retry)queueFlush(Math.min(15000,1000*Math.pow(2,Math.min(failN,4))));
+  return result;
 }
 async function refresh(){ /* traz o que outras pessoas lançaram */
   if(!ME||ME.role==='pending'||document.hidden||flushing||dirtyS||dirtyCells.size)return;
@@ -446,7 +447,7 @@ const UNDO_KEY='rahra-v2-undo';
 function snapshot(why){try{localStorage.setItem(UNDO_KEY,JSON.stringify({why:why,at:Date.now(),data:S}));}catch(e){}}
 function getUndo(){try{const u=JSON.parse(localStorage.getItem(UNDO_KEY)||'null');return u&&u.data?u:null;}catch(e){return null;}}
 
-const ui={tab:'pan',month:null,wk:'all',rep:{preset:'month',from:'',to:'',cids:[],inds:{fat:true,tm:true,pa:true,conv:true},months:[],mind:'fat'}};
+const ui={tab:'pan',month:null,wk:'all',editing:null,rep:{preset:'month',from:'',to:'',cids:[],inds:{fat:true,tm:true,pa:true,conv:true},months:[],mind:'fat'}};
 function initMonth(){
   const t=iso(new Date()),w=S.weeks.find(x=>t>=x.start&&t<=x.end);
   if(w)return w.month;
@@ -454,6 +455,12 @@ function initMonth(){
   return t.slice(0,7);
 }
 ui.month=initMonth();
+/* Relatório: os filtros (ui.rep) são um rascunho; só viram relatório quando confirma em "Gerar relatório" */
+const clone=o=>JSON.parse(JSON.stringify(o));
+let repApplied=clone(ui.rep),repAppliedMonth=ui.month;
+/* Edição por seção (Consultoras, Metas, Semanas, Lançamentos): trava os campos até clicar "Editar";
+   "Cancelar" volta aos valores de quando entrou em edição; "Salvar" só confirma e força sincronizar agora. */
+let editSnap=null;
 
 /* ============ Cálculos ============ */
 const cons1=id=>S.consultants.find(c=>c.id===id);
@@ -506,17 +513,18 @@ function totalRes(wk,cs){
   const a=agg(items);
   return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',a.tm,+wk.tm),pa:cellOf('pa',a.pa,+wk.pa),conv:cellOf('conv',a.conv,+wk.conv)};
 }
+/* Meta do mês de uma consultora = soma das metas semanais dela cadastradas nas semanas do mês (tabela 3 de Cadastros). */
+function monthGoalFor(ws,cid){return ws.reduce((t,w)=>t+goalOf(w,cid),0);}
 function monthRes(m,ws,cs){
   const items=[];let G=0;
-  const mg=S.monthGoals[m]||{};
-  cs.forEach(c=>{G+=+mg[c.id]||0;ws.forEach(w=>{const e=ent(w.id,c.id);if(hasVal(e))items.push({e:e,wk:w});});});
+  cs.forEach(c=>{G+=monthGoalFor(ws,c.id);ws.forEach(w=>{const e=ent(w.id,c.id);if(hasVal(e))items.push({e:e,wk:w});});});
   const a=agg(items);
   return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',a.tm,mean(ws.map(w=>+w.tm))),pa:cellOf('pa',a.pa,mean(ws.map(w=>+w.pa))),conv:cellOf('conv',a.conv,mean(ws.map(w=>+w.conv)))};
 }
 function monthResFor(m,ws,c){
   const items=[];
   ws.forEach(w=>{const e=ent(w.id,c.id);if(hasVal(e))items.push({e:e,wk:w});});
-  const a=agg(items),G=+((S.monthGoals[m]||{})[c.id])||0;
+  const a=agg(items),G=monthGoalFor(ws,c.id);
   return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',a.tm,mean(ws.map(w=>+w.tm))),pa:cellOf('pa',a.pa,mean(ws.map(w=>+w.pa))),conv:cellOf('conv',a.conv,mean(ws.map(w=>+w.conv)))};
 }
 const wkLabel=w=>fmtShort(w.start)+' a '+fmtShort(w.end);
@@ -530,6 +538,69 @@ function twoStep(btn,fn){
   btn._t=setTimeout(()=>{delete btn.dataset.armed;btn.textContent=btn._label;btn.classList.remove('armed');},3500);
 }
 function setSt(td,st){td.classList.remove('c-ok','c-near','c-bad','c-none');td.classList.add('c-'+st);}
+
+/* ============ Edição por seção: Editar / Salvar / Cancelar ============
+   Os campos ficam travados até clicar "Editar". O salvamento automático continua ligado (nada se perde
+   se a aba fechar no meio), mas só grava mesmo no fim: "Salvar" confirma na hora, "Cancelar" desfaz o
+   que foi digitado nesta edição e devolve ao que estava antes de clicar em "Editar". */
+const dis=l=>l?' disabled':'';
+function editBar(key,allowed){
+  if(!allowed)return '';
+  const editing=ui.editing===key,blocked=!!ui.editing&&!editing;
+  if(!editing)return '<div class="actions" style="justify-content:flex-start;margin:14px 0 0">'+
+    '<button class="btn primary" data-act="edit" data-key="'+key+'"'+(blocked?' disabled title="Termine a edição em andamento primeiro."':'')+'>Editar</button></div>';
+  return '<div class="actions" style="justify-content:flex-start;margin:14px 0 0">'+
+    '<button class="btn primary" data-act="save-edit" data-key="'+key+'">Salvar</button>'+
+    '<button class="btn" data-act="cancel-edit" data-key="'+key+'">Cancelar</button></div>';
+}
+function editSnapOf(key){
+  if(key==='cons')return clone(S.consultants);
+  if(key==='params')return {def:clone(S.def),yellow:S.yellow};
+  if(key==='weeks')return clone(S.weeks);
+  if(key==='ent'){const o={};weeksOfMonth(ui.month).forEach(w=>{o[w.id]=clone(S.entries[w.id]||{});});return o;}
+  return null;
+}
+function beginEdit(key){
+  if(ui.editing)return;
+  editSnap={key:key,data:editSnapOf(key)};
+  ui.editing=key;render();
+}
+async function saveEdit(msg){
+  ui.editing=null;editSnap=null;render();
+  clearTimeout(flushT);
+  const r=await flush();
+  if(r==='conflict')return; /* o flush() já avisou sozinho e recarregou os dados */
+  toast((dirtyS||dirtyCells.size)?'Sem conexão agora. Vou continuar tentando salvar sozinho.':msg);
+}
+function cancelEdit(){
+  if(!editSnap){ui.editing=null;render();return;}
+  const key=editSnap.key,data=editSnap.data;
+  if(key==='cons'){S.consultants=data;fullNext=true;dirtyS=true;}
+  else if(key==='params'){S.def=data.def;S.yellow=data.yellow;fullNext=true;dirtyS=true;}
+  else if(key==='weeks'){S.weeks=data;fullNext=true;dirtyS=true;}
+  else if(key==='ent'){
+    Object.keys(data).forEach(wid=>{
+      const oldE=data[wid]||{};
+      S.entries[wid]=S.entries[wid]||{};
+      const ids=new Set(Object.keys(oldE).concat(Object.keys(S.entries[wid])));
+      ids.forEach(cid=>{
+        KEYS.forEach(k=>{
+          const ov=(oldE[cid]&&oldE[cid][k]!=null)?oldE[cid][k]:null;
+          const cur=S.entries[wid][cid]||{},nv=cur[k]!=null?cur[k]:null;
+          if(ov!==nv){
+            S.entries[wid][cid]=S.entries[wid][cid]||{};
+            if(ov==null)delete S.entries[wid][cid][k];else S.entries[wid][cid][k]=ov;
+            markCell(wid,cid,k);
+          }
+        });
+      });
+    });
+  }
+  editSnap=null;ui.editing=null;
+  render();
+  clearTimeout(flushT);
+  flush().then(r=>{if(r!=='conflict')toast('Alterações canceladas.');});
+}
 async function saveFile(name,data,mime){
   let dl=null;
   try{if(window.claude&&window.claude.use)dl=await window.claude.use('downloads');}catch(e){}
@@ -621,30 +692,33 @@ function panHTML(){
 
 /* ============ Aba Cadastros ============ */
 function cadHTML(){
-  let h='<section class="card"><h2 class="sec">1. Consultoras</h2><p class="hint">Cadastre o nome de cada consultora. A meta de vendas é cadastrada por semana na tabela 3 abaixo, já que o valor muda de uma semana para a outra.</p>';
+  const lc=ui.editing!=='cons',lp=ui.editing!=='params',lw=ui.editing!=='weeks';
+  let h='<section class="card"><h2 class="sec">1. Consultoras</h2><p class="hint">Cadastre o nome de cada consultora. A meta de vendas é cadastrada por semana na tabela 3 abaixo, já que o valor muda de uma semana para a outra. Clique em “Editar” para alterar.</p>';
   if(S.consultants.length){
     h+='<div class="sheet-wrap"><table class="sheet"><thead><tr><th class="name">Nome</th><th>Ativa</th><th></th></tr></thead><tbody>';
     S.consultants.forEach(c=>{
-      h+='<tr><th scope="row" class="name p0"><input class="cell-inp left" data-b="c:'+c.id+':name" value="'+esc(c.name)+'" aria-label="Nome da consultora"></th>'+
-        '<td class="ck"><input type="checkbox" data-b="c:'+c.id+':active" '+(c.active?'checked':'')+' aria-label="Ativa: '+esc(c.name)+'"></td>'+
-        '<td><button class="btn sm" data-act="del-cons" data-id="'+c.id+'">Excluir</button></td></tr>';
+      h+='<tr><th scope="row" class="name p0"><input class="cell-inp left" data-b="c:'+c.id+':name" value="'+esc(c.name)+'" aria-label="Nome da consultora"'+dis(lc)+'></th>'+
+        '<td class="ck"><input type="checkbox" data-b="c:'+c.id+':active" '+(c.active?'checked':'')+dis(lc)+' aria-label="Ativa: '+esc(c.name)+'"></td>'+
+        '<td><button class="btn sm" data-act="del-cons" data-id="'+c.id+'"'+dis(lc)+'>Excluir</button></td></tr>';
     });
     h+='</tbody></table></div><p class="note">Desmarque “Ativa” para tirar a consultora das novas semanas sem perder o histórico dela. Excluir apaga também os lançamentos dela.</p>';
   }
-  h+='<div class="add-row"><label class="fld" style="min-width:220px"><span>Nome da consultora</span><input class="inp" id="nc-name" placeholder="Ex.: Maria"></label>'+
-     '<button class="btn primary" data-act="add-cons">Adicionar consultora</button></div></section>';
+  h+='<div class="add-row"><label class="fld" style="min-width:220px"><span>Nome da consultora</span><input class="inp" id="nc-name" placeholder="Ex.: Maria"'+dis(lc)+'></label>'+
+     '<button class="btn primary" data-act="add-cons"'+dis(lc)+'>Adicionar consultora</button></div>';
+  h+=editBar('cons',can.structure())+'</section>';
 
-  h+='<section class="card"><h2 class="sec">2. Metas dos indicadores</h2><p class="hint">Valores padrão das novas semanas. Cada semana guarda os próprios valores (tabela 3), então mudar aqui não altera semanas já cadastradas.</p>'+
+  h+='<section class="card"><h2 class="sec">2. Metas dos indicadores</h2><p class="hint">Valores padrão das novas semanas. Cada semana guarda os próprios valores (tabela 3), então mudar aqui não altera semanas já cadastradas. Clique em “Editar” para alterar.</p>'+
     '<div class="params">'+
-    '<label class="fld"><span>Ticket médio (R$)</span><input class="inp" inputmode="decimal" data-b="p:tm" value="'+pStr('tm',S.def.tm)+'"></label>'+
-    '<label class="fld"><span>PA (peças por atendimento)</span><input class="inp" inputmode="decimal" data-b="p:pa" value="'+pStr('pa',S.def.pa)+'"></label>'+
-    '<label class="fld"><span>Taxa de conversão (%)</span><input class="inp" inputmode="decimal" data-b="p:conv" value="'+pStr('conv',S.def.conv)+'"></label>'+
-    '<label class="fld"><span>Amarelo a partir de (% da meta)</span><input class="inp" inputmode="numeric" data-b="p:yellow" value="'+S.yellow+'"></label></div>'+
-    '<p class="hint" style="margin:12px 0 0">Verde: bateu a meta. Amarelo: chegou a <b id="ylw">'+S.yellow+'%</b> ou mais da meta. Vermelho: abaixo disso.</p></section>';
+    '<label class="fld"><span>Ticket médio (R$)</span><input class="inp" inputmode="decimal" data-b="p:tm" value="'+pStr('tm',S.def.tm)+'"'+dis(lp)+'></label>'+
+    '<label class="fld"><span>PA (peças por atendimento)</span><input class="inp" inputmode="decimal" data-b="p:pa" value="'+pStr('pa',S.def.pa)+'"'+dis(lp)+'></label>'+
+    '<label class="fld"><span>Taxa de conversão (%)</span><input class="inp" inputmode="decimal" data-b="p:conv" value="'+pStr('conv',S.def.conv)+'"'+dis(lp)+'></label>'+
+    '<label class="fld"><span>Amarelo a partir de (% da meta)</span><input class="inp" inputmode="numeric" data-b="p:yellow" value="'+S.yellow+'"'+dis(lp)+'></label></div>'+
+    '<p class="hint" style="margin:12px 0 0">Verde: bateu a meta. Amarelo: chegou a <b id="ylw">'+S.yellow+'%</b> ou mais da meta. Vermelho: abaixo disso.</p>'+
+    editBar('params',can.structure())+'</section>';
 
   const cs=S.consultants.filter(c=>c.active);
   const wm=weeksOfMonth(ui.month);
-  h+='<section class="card"><h2 class="sec">3. Semanas e metas</h2><p class="hint">Cadastre aqui as semanas e a meta de vendas de cada consultora só do mês em edição — cada semana tem seu próprio valor. Os meses já fechados ficam disponíveis na aba Relatórios.</p>';
+  h+='<section class="card"><h2 class="sec">3. Semanas e metas</h2><p class="hint">Cadastre aqui as semanas e a meta de vendas de cada consultora só do mês em edição — cada semana tem seu próprio valor. Clique em “Editar” para alterar; os meses já fechados ficam disponíveis na aba Relatórios.</p>';
   h+='<div class="toolbar" style="margin-bottom:12px"><div class="g"><span class="lab">Mês em edição</span><div class="nav" style="display:flex;align-items:center;gap:8px">'+
      '<button class="btn icon" data-act="mprev" aria-label="Mês anterior">‹</button><b style="min-width:170px;text-align:center;display:inline-block">'+esc(monthLabel(ui.month))+'</b>'+
      '<button class="btn icon" data-act="mnext" aria-label="Próximo mês">›</button></div></div></div>';
@@ -656,20 +730,21 @@ function cadHTML(){
       cs.map(c=>'<th data-cn="'+c.id+'">'+esc(c.name)+'</th>').join('')+'</tr></thead><tbody>';
     wm.forEach(w=>{
       const bad=w.end<w.start;
-      h+='<tr'+(bad?' class="warn" title="A data final vem antes da inicial"':'')+'><th scope="row" class="name p0"><input type="date" class="cell-inp" data-b="w:'+w.id+':start" value="'+w.start+'" aria-label="Início da semana"></th>'+
-        '<td class="p0"><input type="date" class="cell-inp" data-b="w:'+w.id+':end" value="'+w.end+'" aria-label="Fim da semana"></td>'+
-        '<td class="p0"><input type="month" class="cell-inp" data-b="w:'+w.id+':month" value="'+w.month+'" placeholder="AAAA-MM" aria-label="Mês da semana"></td>'+
-        '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':tm" value="'+pStr('tm',w.tm)+'" aria-label="Meta de ticket médio"></td>'+
-        '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':pa" value="'+pStr('pa',w.pa)+'" aria-label="Meta de PA"></td>'+
-        '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':conv" value="'+pStr('conv',w.conv)+'" aria-label="Meta de conversão"></td>'+
-        cs.map(c=>'<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="wg:'+w.id+':'+c.id+'" value="'+(w.goals[c.id]>0?goalStr(w.goals[c.id]):'')+'" placeholder="0,00" aria-label="Meta de vendas de '+esc(c.name)+'"></td>').join('')+
-        '<td><button class="btn sm" data-act="del-week" data-id="'+w.id+'">Excluir</button></td></tr>';
+      h+='<tr'+(bad?' class="warn" title="A data final vem antes da inicial"':'')+'><th scope="row" class="name p0"><input type="date" class="cell-inp" data-b="w:'+w.id+':start" value="'+w.start+'" aria-label="Início da semana"'+dis(lw)+'></th>'+
+        '<td class="p0"><input type="date" class="cell-inp" data-b="w:'+w.id+':end" value="'+w.end+'" aria-label="Fim da semana"'+dis(lw)+'></td>'+
+        '<td class="p0"><input type="month" class="cell-inp" data-b="w:'+w.id+':month" value="'+w.month+'" placeholder="AAAA-MM" aria-label="Mês da semana"'+dis(lw)+'></td>'+
+        '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':tm" value="'+pStr('tm',w.tm)+'" aria-label="Meta de ticket médio"'+dis(lw)+'></td>'+
+        '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':pa" value="'+pStr('pa',w.pa)+'" aria-label="Meta de PA"'+dis(lw)+'></td>'+
+        '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':conv" value="'+pStr('conv',w.conv)+'" aria-label="Meta de conversão"'+dis(lw)+'></td>'+
+        cs.map(c=>'<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="wg:'+w.id+':'+c.id+'" value="'+(w.goals[c.id]>0?goalStr(w.goals[c.id]):'')+'" placeholder="0,00" aria-label="Meta de vendas de '+esc(c.name)+'"'+dis(lw)+'></td>').join('')+
+        '<td><button class="btn sm" data-act="del-week" data-id="'+w.id+'"'+dis(lw)+'>Excluir</button></td></tr>';
     });
     h+='</tbody></table></div>';
   }
-  h+='<div class="add-row"><button class="btn primary" data-act="add-week">Nova semana</button>'+
+  h+='<div class="add-row"><button class="btn primary" data-act="add-week"'+dis(lw)+'>Nova semana</button>'+
      (wm.length?'<button class="btn" data-act="close-month">Salvar metas de '+esc(monthLabel(ui.month))+' e ir para o próximo mês</button>':'')+
-     '</div></section>';
+     '</div>';
+  h+=editBar('weeks',can.structure())+'</section>';
 
   h+='<section class="card"><h2 class="sec">Backup</h2><p class="hint">Os dados ficam salvos no banco online e todos os usuários liberados veem a mesma informação. Baixe um backup para ter uma cópia em arquivo. Restaurar um backup substitui tudo, inclusive os lançamentos.</p>'+
     '<p class="hint" style="margin-top:-4px"><b>'+(lastBackup()?'Último backup neste aparelho: '+new Date(lastBackup()).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'}):'Você ainda não baixou nenhum backup neste aparelho.')+'</b></p>'+
@@ -692,7 +767,8 @@ function semHTML(){
     '<button class="chip" data-act="wkpick" data-v="all" aria-pressed="'+(ui.wk==='all')+'">Todas</button>'+
     ws.map((w,i)=>'<button class="chip" data-act="wkpick" data-v="'+w.id+'" aria-pressed="'+(ui.wk===w.id)+'">Semana '+(i+1)+' ('+wkLabel(w)+')</button>').join('')+
     '</div></div></div>';
-  h+='<p class="hint" style="margin:14px 2px 0">Preencha no fim de cada semana o valor vendido e os indicadores de cada consultora. As cores e os totais mudam na hora.</p>';
+  const le=ui.editing!=='ent';
+  h+='<p class="hint" style="margin:14px 2px 0">Clique em “Editar” para preencher o valor vendido e os indicadores de cada consultora. As cores e os totais mudam na hora.</p>';
   h+='<div class="legend"><span class="lg c-ok">✓ Bateu a meta</span><span class="lg c-near">≈ Quase (a partir de '+S.yellow+'%)</span><span class="lg c-bad">✕ Abaixo da meta</span></div>';
   h+='<div class="sheet-wrap"><table class="sheet" id="grid"><caption class="sr">Planilha semanal</caption><thead><tr><th class="name">Consultora</th><th>Meta de vendas</th><th>Vendido (R$)</th><th>% da meta</th><th>Ticket médio (R$)</th><th>PA</th><th>Conversão (%)</th></tr></thead><tbody>';
   show.forEach(w=>{
@@ -701,7 +777,7 @@ function semHTML(){
       '<td>Meta '+fmtGoal('tm',+w.tm)+'</td><td>Meta '+fmt('pa',+w.pa)+'</td><td>Meta '+fmt('conv',+w.conv)+'</td></tr>';
     cs.forEach(c=>{
       const e=ent(w.id,c.id)||{},r=resForWeek(w,c.id);
-      const inp=(k,d)=>'<td class="p0 num c-'+r[k].st+'" data-k="'+k+'"><input class="cell-inp" inputmode="decimal" data-b="e:'+w.id+':'+c.id+':'+k+'" data-live="1" value="'+(nn(e[k])==null?'':numStr(e[k],d))+'" placeholder="'+(k==='conv'?'0,0':'0,00')+'" aria-label="'+LBL[k]+' de '+esc(c.name)+'"></td>';
+      const inp=(k,d)=>'<td class="p0 num c-'+r[k].st+'" data-k="'+k+'"><input class="cell-inp" inputmode="decimal" data-b="e:'+w.id+':'+c.id+':'+k+'" data-live="1" value="'+(nn(e[k])==null?'':numStr(e[k],d))+'" placeholder="'+(k==='conv'?'0,0':'0,00')+'" aria-label="'+LBL[k]+' de '+esc(c.name)+'"'+dis(le)+'></td>';
       h+='<tr data-w="'+w.id+'" data-c="'+c.id+'"><th scope="row" class="name">'+esc(c.name)+'</th>'+
         '<td class="num goal" data-k="goal">'+fmtGoal('fat',r.fat.goal)+'</td>'+inp('fat',2)+
         '<td class="num c-'+r.fat.st+'" data-k="pct">'+pctText(r.fat)+'</td>'+inp('tm',2)+inp('pa',2)+inp('conv',1)+'</tr>';
@@ -714,6 +790,7 @@ function semHTML(){
       ['tm','pa','conv'].map(k=>'<td class="num c-'+t[k].st+'" data-k="'+k+'">'+fmt(k,t[k].val)+'</td>').join('')+'</tr>';
   });
   h+='</tbody></table></div><p class="note">O ticket médio, o PA e a conversão da loja são médias ponderadas pelo número de vendas de cada consultora. As metas de cada semana são editadas em Cadastros.</p>';
+  h+=editBar('ent',can.entries());
   return h;
 }
 function consOfWeek(w){return S.consultants.filter(c=>c.active||hasVal(ent(w.id,c.id)));}
@@ -734,15 +811,15 @@ function menHTML(){
   const m=ui.month,ws=weeksOfMonth(m);
   if(!ws.length||!S.consultants.length)return emptyMonthHTML();
   const cs=consFor(ws),avg={tm:mean(ws.map(w=>+w.tm)),pa:mean(ws.map(w=>+w.pa)),conv:mean(ws.map(w=>+w.conv))};
-  let h='<p class="hint" style="margin:18px 2px 0">A soma das semanas de <b>'+esc(monthLabel(m))+'</b> aparece automaticamente. Cadastre aqui a meta do mês de cada consultora.</p>';
+  let h='<p class="hint" style="margin:18px 2px 0">A soma das semanas de <b>'+esc(monthLabel(m))+'</b> aparece automaticamente. A meta do mês de cada consultora também é somada sozinha, a partir das metas de cada semana cadastradas em Cadastros.</p>';
   h+='<div class="legend"><span class="lg c-ok">✓ Bateu a meta</span><span class="lg c-near">≈ Quase (a partir de '+S.yellow+'%)</span><span class="lg c-bad">✕ Abaixo da meta</span></div>';
   h+='<div class="sheet-wrap"><table class="sheet" id="mgrid"><caption class="sr">Resultado do mês</caption><thead><tr><th class="name">Consultora</th><th>Meta do mês (R$)</th>'+
     ws.map((w,i)=>'<th>Semana '+(i+1)+'<small>'+wkLabel(w)+'</small></th>').join('')+
     '<th>Total vendido</th><th>% da meta</th><th>Ticket médio<small>meta '+fmtGoal('tm',avg.tm)+'</small></th><th>PA<small>meta '+fmt('pa',avg.pa)+'</small></th><th>Conversão<small>meta '+fmt('conv',avg.conv)+'</small></th></tr></thead><tbody>';
   cs.forEach(c=>{
-    const r=monthResFor(m,ws,c),mg=(S.monthGoals[m]||{})[c.id];const sugg=ws.reduce((t,w)=>t+goalOf(w,c.id),0);
+    const r=monthResFor(m,ws,c);
     h+='<tr data-c="'+c.id+'"><th scope="row" class="name">'+esc(c.name)+'</th>'+
-      '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="mg:'+c.id+'" data-live="1" value="'+(mg>0?goalStr(mg):'')+'" placeholder="'+(sugg>0?'sugestão '+goalStr(sugg):'0,00')+'" aria-label="Meta do mês de '+esc(c.name)+'"></td>';
+      '<td class="num goal" data-k="goal">'+fmtGoal('fat',r.fat.goal)+'</td>';
     ws.forEach(w=>{const x=resForWeek(w,c.id).fat;h+='<td class="num c-'+x.st+'" data-k="w:'+w.id+'">'+fmt('fat',x.val)+'</td>';});
     h+='<td class="num c-'+r.fat.st+'" data-k="tot">'+fmt('fat',r.fat.val)+'</td><td class="num c-'+r.fat.st+'" data-k="pct">'+pctText(r.fat)+'</td>'+
       KEYS.slice(1).map(k=>'<td class="num c-'+r[k].st+'" data-k="'+k+'">'+fmt(k,r[k].val)+'</td>').join('')+'</tr>';
@@ -755,40 +832,33 @@ function menHTML(){
   h+='<p class="note">Cada semana é colorida pela meta semanal. O total é colorido pela meta do mês. Ticket médio, PA e conversão do mês são médias ponderadas pelo número de vendas de cada semana.</p>';
   return h;
 }
-function paintMonth(){
-  const m=ui.month,ws=weeksOfMonth(m),cs=consFor(ws);
-  const set=(tr,k,st,txt)=>{const td=tr.querySelector('[data-k="'+k+'"]');if(!td)return;if(st)setSt(td,st);if(txt!=null)td.textContent=txt;};
-  $$('#mgrid tbody tr').forEach(tr=>{
-    const isTot=!!tr.dataset.tot,r=isTot?monthRes(m,ws,cs):monthResFor(m,ws,cons1(tr.dataset.c));
-    set(tr,'tot',r.fat.st,fmt('fat',r.fat.val));set(tr,'pct',r.fat.st,pctText(r.fat));
-    KEYS.slice(1).forEach(k=>set(tr,k,r[k].st,fmt(k,r[k].val)));
-    if(isTot)set(tr,'goal',null,fmtGoal('fat',r.fat.goal));
-  });
-}
 
 /* ============ Aba Relatórios ============ */
-function repWeeks(){
-  const R=ui.rep;let ws;
-  if(R.preset==='month')ws=weeksOfMonth(ui.month);
-  else if(R.preset==='prev')ws=weeksOfMonth(addMonths(ui.month,-1));
+/* Os filtros (ui.rep/ui.month) são um rascunho editável; o relatório mostrado usa o que foi
+   confirmado em "Gerar relatório" (repApplied/repAppliedMonth), até a próxima confirmação. */
+function weeksForFilter(R,month){
+  let ws;
+  if(R.preset==='month')ws=weeksOfMonth(month);
+  else if(R.preset==='prev')ws=weeksOfMonth(addMonths(month,-1));
   else if(R.preset==='all')ws=S.weeks.slice();
   else if(R.preset==='months'){ws=[];R.months.forEach(m=>{ws=ws.concat(weeksOfMonth(m));});}
   else ws=S.weeks.filter(w=>w.start>=R.from&&w.start<=R.to);
   return ws.sort(byStart);
 }
-function repPeriodText(){
-  const R=ui.rep;
-  if(R.preset==='month')return monthLabel(ui.month);
-  if(R.preset==='prev')return monthLabel(addMonths(ui.month,-1));
+function periodText(R,month){
+  if(R.preset==='month')return monthLabel(month);
+  if(R.preset==='prev')return monthLabel(addMonths(month,-1));
   if(R.preset==='all')return 'Todas as semanas cadastradas';
   if(R.preset==='months')return R.months.length?R.months.slice().sort().map(monthLabel).join(', '):'Nenhum mês selecionado';
   return (isDate(R.from)?fmtBR(R.from):'…')+' a '+(isDate(R.to)?fmtBR(R.to):'…');
 }
+function repWeeks(){return weeksForFilter(repApplied,repAppliedMonth);}
+function repPeriodText(){return periodText(repApplied,repAppliedMonth);}
 /* Meses com ao menos uma semana cadastrada, em ordem cronológica */
 function allMonths(){const s={};S.weeks.forEach(w=>{s[w.month]=1;});return Object.keys(s).sort();}
 /* Modelo do relatório "Comparar meses": um indicador por vez, um mês por coluna */
 function monthsModel(){
-  const R=ui.rep,months=R.months.slice().sort(),k=R.mind||'fat';
+  const R=repApplied,months=R.months.slice().sort(),k=R.mind||'fat';
   const cols=months.map(m=>({m:m,ws:weeksOfMonth(m)}));
   let allWs=[];cols.forEach(c=>{allWs=allWs.concat(c.ws);});
   const all=consFor(allWs);
@@ -816,7 +886,7 @@ function monthsTblHTML(mm){
   return h+'</tbody></table></div>';
 }
 function repModel(){
-  const R=ui.rep,ws=repWeeks(),all=consFor(ws);
+  const R=repApplied,ws=repWeeks(),all=consFor(ws);
   const cs=all.filter(c=>!R.cids.length||R.cids.indexOf(c.id)>=0);
   const inds=KEYS.filter(k=>R.inds[k]);
   const head0=[{t:'Consultora',rs:2,col:0,cs:1}],head1=[];let col=1;
@@ -865,7 +935,8 @@ function tblHTML(t){
 function relHTML(){
   const R=ui.rep;
   if(!S.consultants.length||!S.weeks.length)return emptyMonthHTML();
-  const ws0=repWeeks(),all=consFor(ws0);
+  const ws0=weeksForFilter(R,ui.month),all=consFor(ws0);
+  const staged=stable(R)!==stable(repApplied)||ui.month!==repAppliedMonth;
   let h='<section class="card no-print"><div class="toolbar">';
   h+='<div class="g"><span class="lab">Período</span><div class="chips">'+
     [['month','Mês selecionado'],['prev','Mês anterior'],['all','Todas as semanas'],['months','Comparar meses'],['custom','Datas']].map(p=>'<button class="chip" data-act="rpreset" data-v="'+p[0]+'" aria-pressed="'+(R.preset===p[0])+'">'+p[1]+'</button>').join('')+'</div>';
@@ -878,9 +949,14 @@ function relHTML(){
     all.map(c=>'<button class="chip" data-act="rcons" data-id="'+c.id+'" aria-pressed="'+(R.cids.indexOf(c.id)>=0)+'">'+esc(c.name)+'</button>').join('')+'</div></div>';
   if(R.preset==='months')h+='<div class="g"><span class="lab">Indicador</span><div class="chips">'+KEYS.map(k=>'<button class="chip" data-act="rmind" data-v="'+k+'" aria-pressed="'+(R.mind===k)+'">'+LBL[k]+'</button>').join('')+'</div></div></div></section>';
   else h+='<div class="g"><span class="lab">Indicadores</span><div class="chips">'+KEYS.map(k=>'<button class="chip" data-act="rind" data-v="'+k+'" aria-pressed="'+!!R.inds[k]+'">'+LBL[k]+'</button>').join('')+'</div></div></div></section>';
+  h+='<div class="actions no-print" style="justify-content:flex-start">'+
+     '<button class="btn primary" data-act="rep-gen">Gerar relatório</button>'+
+     '<button class="btn" data-act="rep-cancel"'+(staged?'':' disabled')+'>Cancelar</button>'+
+     (staged?'<span class="note" style="margin:0;align-self:center">Há filtros novos ainda não aplicados.</span>':'')+
+     '</div>';
   h+='<div class="actions no-print"><button class="btn" data-act="print">Imprimir</button><button class="btn" data-act="csv">Baixar planilha (CSV)</button><button class="btn primary" data-act="pdf">Salvar PDF</button></div>';
 
-  if(R.preset==='months'){
+  if(repApplied.preset==='months'){
     const mm=monthsModel();
     h+='<article class="report" id="rep"><div class="rep-head"><img class="rep-logo" src="'+LOGO+'" alt="Rahra Semijoias"><div><div class="rep-title">Comparativo entre meses</div>'+
       '<div class="rep-meta"><div>Meses: <b>'+esc(mm.period)+'</b></div><div>Consultoras: '+esc(mm.cons)+'</div><div>Indicador: '+esc(mm.ind)+'</div><div>Emitido em '+mm.today+'</div></div></div></div>';
@@ -1039,7 +1115,7 @@ async function buildPDF(m){
 }
 const csvQ=v=>{v=String(v==null?'':v).replace(/^[✓≈✕]\s*/,'');return /[;"\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
 function saveCSV(){
-  if(ui.rep.preset==='months')return saveMonthsCSV();
+  if(repApplied.preset==='months')return saveMonthsCSV();
   const m=repModel();
   if(!m.nind||!m.nweeks||!m.ncons){toast('Não há dados para este filtro.');return;}
   const lines=[];
@@ -1064,7 +1140,7 @@ function saveMonthsCSV(){
 async function savePDF(){
   toast('Gerando o PDF…');
   try{
-    const blob=ui.rep.preset==='months'?await buildMonthsPDF(monthsModel()):await buildPDF(repModel());
+    const blob=repApplied.preset==='months'?await buildMonthsPDF(monthsModel()):await buildPDF(repModel());
     await saveFile('relatorio-rahra-'+iso(new Date())+'.pdf',blob,'application/pdf');
   }catch(e){console.error(e);toast('Não consegui gerar o PDF. Tente “Imprimir” e escolha Salvar como PDF.');}
 }
@@ -1203,7 +1279,7 @@ async function start(){
     return;
   }
   try{await pull();}catch(e){started=false;gateMsg('Não consegui carregar os dados',e.message,true);return;}
-  ui.month=initMonth();ui.tab='pan';
+  ui.month=initMonth();ui.tab='pan';repApplied=clone(ui.rep);repAppliedMonth=ui.month;
   ungate();setSync('Tudo salvo','ok');render();
   if(can.structure()&&!S.consultants.length){ui.tab='cad';render();}
   setInterval(refresh,30000);
@@ -1238,16 +1314,6 @@ function bind(el,type){
       paintWeek(wid);renderStrip();
       markCell(wid,cid,k);
       return;}
-    case 'mg':{
-      const num=parseNum(v);
-      S.monthGoals[ui.month]=S.monthGoals[ui.month]||{};
-      if(String(v).trim()==='')delete S.monthGoals[ui.month][p[1]];
-      else if(num!=null&&num>=0){S.monthGoals[ui.month][p[1]]=num;el.classList.remove('invalid');}
-      else{el.classList.add('invalid');return;}
-      if(type==='change'&&num!=null)el.value=goalStr(num);
-      paintMonth();renderStrip();
-      if(type==='input'){saveSoon();return;}
-      break;}
     case 'c':{
       const c=cons1(p[1]);if(!c)return;
       if(p[2]==='name'){const t=String(v).trim();if(!t){el.value=c.name;return;}c.name=t;$$('[data-cn="'+c.id+'"]').forEach(x=>{x.textContent=t;});}
@@ -1337,11 +1403,21 @@ function act(a,el){
     case 'rind':ui.rep.inds[v]=!ui.rep.inds[v];render();break;
     case 'rmonth':{const i=ui.rep.months.indexOf(v);if(i>=0)ui.rep.months.splice(i,1);else ui.rep.months.push(v);render();break;}
     case 'rmind':ui.rep.mind=v;render();break;
+    case 'rep-gen':repApplied=clone(ui.rep);repAppliedMonth=ui.month;render();window.scrollTo(0,0);toast('Relatório gerado.');break;
+    case 'rep-cancel':ui.rep=clone(repApplied);render();toast('Filtros voltaram ao último relatório gerado.');break;
+    case 'edit':{
+      const key=el.dataset.key;
+      if(!(key==='ent'?can.entries():can.structure()))return;
+      beginEdit(key);break;}
+    case 'save-edit':{
+      const lbl={cons:'Consultoras salvas.',params:'Metas dos indicadores salvas.',weeks:'Semanas e metas salvas.',ent:'Lançamentos salvos.'}[el.dataset.key]||'Salvo.';
+      saveEdit(lbl);break;}
+    case 'cancel-edit':cancelEdit();break;
     case 'print':doPrint();break;
     case 'pdf':savePDF();break;
-    case 'reset':twoStep(el,()=>{snapshot('limpeza dos dados de exemplo');S=defaults();save();ui.month=initMonth();ui.tab='cad';ui.rep.cids=[];render();toast('Tudo limpo. Comece cadastrando as consultoras.');});break;
+    case 'reset':twoStep(el,()=>{snapshot('limpeza dos dados de exemplo');S=defaults();save();ui.month=initMonth();ui.tab='cad';ui.rep.cids=[];repApplied=clone(ui.rep);repAppliedMonth=ui.month;render();toast('Tudo limpo. Comece cadastrando as consultoras.');});break;
     case 'export-backup':markBackup();render();saveFile('rahra-backup-'+iso(new Date())+'.json',JSON.stringify(S,null,1),'application/json');break;
-    case 'undo':{const u=getUndo();if(!u)break;S=migrate(u.data);saveFull();try{localStorage.removeItem(UNDO_KEY);}catch(e){}ui.month=initMonth();render();toast('Desfeito: '+u.why+'.');break;}
+    case 'undo':{const u=getUndo();if(!u)break;S=migrate(u.data);saveFull();try{localStorage.removeItem(UNDO_KEY);}catch(e){}ui.month=initMonth();repAppliedMonth=ui.month;render();toast('Desfeito: '+u.why+'.');break;}
     case 'csv':saveCSV();break;
     case 'reload':location.reload();break;
     case 'import-backup':$('#imp').click();break;
@@ -1354,7 +1430,7 @@ function importFile(inp){
     try{
       const j=JSON.parse(rd.result);
       if(!j||!Array.isArray(j.consultants)||!Array.isArray(j.weeks))throw new Error('formato');
-      snapshot('restauração de backup');S=migrate(j);saveFull();ui.month=initMonth();render();toast('Backup restaurado.');
+      snapshot('restauração de backup');S=migrate(j);saveFull();ui.month=initMonth();repAppliedMonth=ui.month;render();toast('Backup restaurado.');
     }catch(e){toast('Arquivo inválido. Use um backup baixado deste painel.');}
     inp.value='';
   };
