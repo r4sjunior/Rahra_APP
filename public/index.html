@@ -621,19 +621,17 @@ function panHTML(){
 
 /* ============ Aba Cadastros ============ */
 function cadHTML(){
-  let h='<section class="card"><h2 class="sec">1. Consultoras</h2><p class="hint">Cadastre o nome e a meta de vendas por semana de cada consultora. Essa meta é o valor padrão das novas semanas.</p>';
+  let h='<section class="card"><h2 class="sec">1. Consultoras</h2><p class="hint">Cadastre o nome de cada consultora. A meta de vendas é cadastrada por semana na tabela 3 abaixo, já que o valor muda de uma semana para a outra.</p>';
   if(S.consultants.length){
-    h+='<div class="sheet-wrap"><table class="sheet"><thead><tr><th class="name">Nome</th><th>Meta de vendas por semana (R$)</th><th>Ativa</th><th></th></tr></thead><tbody>';
+    h+='<div class="sheet-wrap"><table class="sheet"><thead><tr><th class="name">Nome</th><th>Ativa</th><th></th></tr></thead><tbody>';
     S.consultants.forEach(c=>{
       h+='<tr><th scope="row" class="name p0"><input class="cell-inp left" data-b="c:'+c.id+':name" value="'+esc(c.name)+'" aria-label="Nome da consultora"></th>'+
-        '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="c:'+c.id+':goal" value="'+goalStr(c.goal)+'" aria-label="Meta semanal de '+esc(c.name)+'"></td>'+
         '<td class="ck"><input type="checkbox" data-b="c:'+c.id+':active" '+(c.active?'checked':'')+' aria-label="Ativa: '+esc(c.name)+'"></td>'+
         '<td><button class="btn sm" data-act="del-cons" data-id="'+c.id+'">Excluir</button></td></tr>';
     });
     h+='</tbody></table></div><p class="note">Desmarque “Ativa” para tirar a consultora das novas semanas sem perder o histórico dela. Excluir apaga também os lançamentos dela.</p>';
   }
   h+='<div class="add-row"><label class="fld" style="min-width:220px"><span>Nome da consultora</span><input class="inp" id="nc-name" placeholder="Ex.: Maria"></label>'+
-     '<label class="fld" style="width:200px"><span>Meta de vendas por semana (R$)</span><input class="inp" id="nc-goal" inputmode="decimal" placeholder="5.000"></label>'+
      '<button class="btn primary" data-act="add-cons">Adicionar consultora</button></div></section>';
 
   h+='<section class="card"><h2 class="sec">2. Metas dos indicadores</h2><p class="hint">Valores padrão das novas semanas. Cada semana guarda os próprios valores (tabela 3), então mudar aqui não altera semanas já cadastradas.</p>'+
@@ -645,14 +643,18 @@ function cadHTML(){
     '<p class="hint" style="margin:12px 0 0">Verde: bateu a meta. Amarelo: chegou a <b id="ylw">'+S.yellow+'%</b> ou mais da meta. Vermelho: abaixo disso.</p></section>';
 
   const cs=S.consultants.filter(c=>c.active);
-  h+='<section class="card"><h2 class="sec">3. Semanas e metas</h2><p class="hint">Preencha as datas de cada semana. Os valores nascem iguais aos padrões acima e você pode ajustar qualquer semana. O mês indica onde a semana entra na aba Mensal.</p>';
-  if(!S.weeks.length){
-    h+='<div class="empty" style="margin-top:0">Nenhuma semana cadastrada ainda.</div>';
+  const wm=weeksOfMonth(ui.month);
+  h+='<section class="card"><h2 class="sec">3. Semanas e metas</h2><p class="hint">Cadastre aqui as semanas e a meta de vendas de cada consultora só do mês em edição — cada semana tem seu próprio valor. Os meses já fechados ficam disponíveis na aba Relatórios.</p>';
+  h+='<div class="toolbar" style="margin-bottom:12px"><div class="g"><span class="lab">Mês em edição</span><div class="nav" style="display:flex;align-items:center;gap:8px">'+
+     '<button class="btn icon" data-act="mprev" aria-label="Mês anterior">‹</button><b style="min-width:170px;text-align:center;display:inline-block">'+esc(monthLabel(ui.month))+'</b>'+
+     '<button class="btn icon" data-act="mnext" aria-label="Próximo mês">›</button></div></div></div>';
+  if(!wm.length){
+    h+='<div class="empty" style="margin-top:0">Nenhuma semana cadastrada em '+esc(monthLabel(ui.month))+'.</div>';
   }else{
     h+='<div class="sheet-wrap"><table class="sheet"><thead><tr><th rowspan="2" class="name">Início da semana</th><th rowspan="2">Fim da semana</th><th rowspan="2">Mês</th><th colspan="3">Metas dos indicadores</th>'+
       (cs.length?'<th colspan="'+cs.length+'">Meta de vendas da semana (R$)</th>':'')+'<th rowspan="2"></th></tr><tr><th>Ticket médio (R$)</th><th>PA</th><th>Conversão (%)</th>'+
       cs.map(c=>'<th data-cn="'+c.id+'">'+esc(c.name)+'</th>').join('')+'</tr></thead><tbody>';
-    S.weeks.slice().sort(byStart).forEach(w=>{
+    wm.forEach(w=>{
       const bad=w.end<w.start;
       h+='<tr'+(bad?' class="warn" title="A data final vem antes da inicial"':'')+'><th scope="row" class="name p0"><input type="date" class="cell-inp" data-b="w:'+w.id+':start" value="'+w.start+'" aria-label="Início da semana"></th>'+
         '<td class="p0"><input type="date" class="cell-inp" data-b="w:'+w.id+':end" value="'+w.end+'" aria-label="Fim da semana"></td>'+
@@ -660,12 +662,14 @@ function cadHTML(){
         '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':tm" value="'+pStr('tm',w.tm)+'" aria-label="Meta de ticket médio"></td>'+
         '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':pa" value="'+pStr('pa',w.pa)+'" aria-label="Meta de PA"></td>'+
         '<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="w:'+w.id+':conv" value="'+pStr('conv',w.conv)+'" aria-label="Meta de conversão"></td>'+
-        cs.map(c=>'<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="wg:'+w.id+':'+c.id+'" value="'+(w.goals[c.id]>0?goalStr(w.goals[c.id]):'')+'" placeholder="'+goalStr(c.goal)+'" aria-label="Meta de vendas de '+esc(c.name)+'"></td>').join('')+
+        cs.map(c=>'<td class="p0"><input class="cell-inp" inputmode="decimal" data-b="wg:'+w.id+':'+c.id+'" value="'+(w.goals[c.id]>0?goalStr(w.goals[c.id]):'')+'" placeholder="0,00" aria-label="Meta de vendas de '+esc(c.name)+'"></td>').join('')+
         '<td><button class="btn sm" data-act="del-week" data-id="'+w.id+'">Excluir</button></td></tr>';
     });
     h+='</tbody></table></div>';
   }
-  h+='<div class="add-row"><button class="btn primary" data-act="add-week">Nova semana</button></div></section>';
+  h+='<div class="add-row"><button class="btn primary" data-act="add-week">Nova semana</button>'+
+     (wm.length?'<button class="btn" data-act="close-month">Salvar metas de '+esc(monthLabel(ui.month))+' e ir para o próximo mês</button>':'')+
+     '</div></section>';
 
   h+='<section class="card"><h2 class="sec">Backup</h2><p class="hint">Os dados ficam salvos no banco online e todos os usuários liberados veem a mesma informação. Baixe um backup para ter uma cópia em arquivo. Restaurar um backup substitui tudo, inclusive os lançamentos.</p>'+
     '<p class="hint" style="margin-top:-4px"><b>'+(lastBackup()?'Último backup neste aparelho: '+new Date(lastBackup()).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'}):'Você ainda não baixou nenhum backup neste aparelho.')+'</b></p>'+
@@ -1247,7 +1251,6 @@ function bind(el,type){
     case 'c':{
       const c=cons1(p[1]);if(!c)return;
       if(p[2]==='name'){const t=String(v).trim();if(!t){el.value=c.name;return;}c.name=t;$$('[data-cn="'+c.id+'"]').forEach(x=>{x.textContent=t;});}
-      else if(p[2]==='goal'){const n=parseNum(v);if(n==null||n<0){el.value=goalStr(c.goal);toast('Digite um valor válido.');return;}c.goal=n;el.value=goalStr(n);}
       else if(p[2]==='active'){c.active=!!v;save();render();return;}
       renderStrip();break;}
     case 'p':{
@@ -1283,18 +1286,18 @@ function bind(el,type){
 function addCons(){
   const nm=$('#nc-name').value.trim();
   if(!nm){toast('Digite o nome da consultora.');$('#nc-name').focus();return;}
-  const g=parseNum($('#nc-goal').value);
-  S.consultants.push({id:uid(),name:nm,active:true,goal:g>0?g:0});
+  S.consultants.push({id:uid(),name:nm,active:true,goal:0});
   save();render();toast(nm+' adicionada.');
 }
 function addWeek(){
   const last=S.weeks.slice().sort(byStart).pop();
   const start=last?iso(addDays(parse(last.end),1)):iso(monday(new Date())),end=iso(addDays(parse(start),6));
   const w={id:uid(),start:start,end:end,month:monthOf(start,end),tm:S.def.tm,pa:S.def.pa,conv:S.def.conv,goals:{}};
-  S.consultants.filter(c=>c.active).forEach(c=>{w.goals[c.id]=c.goal;});
-  S.weeks.push(w);ui.month=w.month;save();render();toast('Semana adicionada: '+wkLabel(w)+'. Ajuste as datas se precisar.');
+  /* Começa com as metas da semana anterior (ponto de partida), já que cada semana costuma ter um valor próprio para ajustar. */
+  if(last)S.consultants.filter(c=>c.active).forEach(c=>{if(last.goals[c.id]>0)w.goals[c.id]=last.goals[c.id];});
+  S.weeks.push(w);ui.month=w.month;save();render();toast('Semana adicionada: '+wkLabel(w)+'. Ajuste as datas e as metas se precisar.');
 }
-const ADMIN_ACTS=['add-cons','del-cons','add-week','del-week','reset','import-backup','export-backup','undo'];
+const ADMIN_ACTS=['add-cons','del-cons','add-week','del-week','close-month','reset','import-backup','export-backup','undo'];
 function act(a,el){
   const v=el.dataset.v;
   if(ADMIN_ACTS.indexOf(a)>=0&&!can.structure())return;
@@ -1315,6 +1318,10 @@ function act(a,el){
       save();render();toast('Consultora excluída.');
     });break;
     case 'add-week':addWeek();break;
+    case 'close-month':{
+      const cur=monthLabel(ui.month);ui.month=addMonths(ui.month,1);render();window.scrollTo(0,0);
+      toast('Metas de '+cur+' salvas. Cadastre agora as metas de '+monthLabel(ui.month)+'.');
+      break;}
     case 'del-week':twoStep(el,()=>{
       const id=el.dataset.id;snapshot('exclusão de semana');S.weeks=S.weeks.filter(w=>w.id!==id);delete S.entries[id];
       save();render();toast('Semana excluída.');
@@ -1361,7 +1368,7 @@ document.addEventListener('change',e=>{
 });
 document.addEventListener('input',e=>{const el=e.target.closest('[data-live]');if(el)bind(el,'input');});
 document.addEventListener('keydown',e=>{
-  if(e.key==='Enter'&&e.target.tagName==='INPUT'&&(e.target.id==='nc-name'||e.target.id==='nc-goal')){e.preventDefault();addCons();}
+  if(e.key==='Enter'&&e.target.tagName==='INPUT'&&e.target.id==='nc-name'){e.preventDefault();addCons();}
 });
 document.addEventListener('keydown',e=>{
   const t=e.target;

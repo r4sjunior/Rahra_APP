@@ -107,15 +107,18 @@ try {
   assert.equal(await p.$eval('.tab[aria-selected=true]', e => e.textContent), 'Cadastros', 'banco vazio abre em Cadastros');
   ok('e-mail do admin entra como administrador e vê todas as abas');
 
-  await p.type('#nc-name', 'Ana Paula'); await p.type('#nc-goal', '5000'); await p.click('[data-act=add-cons]');
-  await p.type('#nc-name', 'Beatriz'); await p.type('#nc-goal', '4000'); await p.click('[data-act=add-cons]');
+  await p.type('#nc-name', 'Ana Paula'); await p.click('[data-act=add-cons]');
+  await p.type('#nc-name', 'Beatriz'); await p.click('[data-act=add-cons]');
   await p.click('[data-act=add-week]');
+  const wg = await p.$$('input[data-b^="wg:"]');
+  await wg[0].focus(); await p.keyboard.type('5000'); await p.keyboard.press('Tab');
+  await wg[1].focus(); await p.keyboard.type('4000'); await p.keyboard.press('Tab');
   await saved(p, 'salvou cadastros');
   const rows = (await db.query('select name, goal::float8 as goal from consultants order by position')).rows;
-  assert.deepEqual(rows, [{ name: 'Ana Paula', goal: 5000 }, { name: 'Beatriz', goal: 4000 }]);
+  assert.deepEqual(rows, [{ name: 'Ana Paula', goal: 0 }, { name: 'Beatriz', goal: 0 }]);
   assert.equal((await db.query('select count(*)::int as n from weeks')).rows[0].n, 1);
-  assert.equal((await db.query('select count(*)::int as n from week_goals')).rows[0].n, 2);
-  ok('cadastros vão para o banco (consultoras, semana e metas)');
+  assert.deepEqual((await db.query('select goal::float8 as goal from week_goals order by goal')).rows, [{ goal: 4000 }, { goal: 5000 }]);
+  ok('cadastros vão para o banco (consultoras, semana e metas por semana)');
 
   await p.click('.tab[data-v=sem]');
   const fat = await p.$('#grid input[data-b$=":fat"]');
