@@ -209,6 +209,19 @@ try {
   await p.click('[data-act=rep-gen]');
   ok('botão "Todos" liga/desliga todos os indicadores do relatório de uma vez');
 
+  const pctHeaders = await p.$$eval('#rep thead th', a => a.map(e => e.textContent.trim()).filter(t => t === '% da meta'));
+  assert.equal(pctHeaders.length, 2, 'só a coluna de Vendas mostra % da meta (uma vez no resumo, outra no detalhe semana a semana); Ticket médio/PA/Conversão não mostram mais');
+  ok('relatório de desempenho não mostra % da meta para TM/PA/Conversão, só para Vendas');
+
+  await p.click('[data-act=rpreset][data-v=months]');
+  await p.click('[data-act=rmonth]');
+  assert.equal(await p.$eval('[data-act=rind-all]', e => e.getAttribute('aria-pressed')), 'true', 'ao trocar para "Comparar meses", o filtro de indicadores continua com todos marcados');
+  await p.click('[data-act=rep-gen]');
+  await until(p, () => document.querySelectorAll('#rep h3.sec').length >= 4, 'comparativo entre meses com todos os indicadores gerado');
+  const sections = await p.$$eval('#rep h3.sec', a => a.map(e => e.textContent));
+  assert.deepEqual(sections.slice().sort(), ['Conversão', 'PA', 'Ticket médio', 'Vendas'], 'Comparar meses mostra uma tabela por indicador quando todos estão selecionados');
+  ok('em "Comparar meses" dá para selecionar todos os indicadores de uma vez (antes só um por vez)');
+
   await p.reload();
   await loaded(p, 'recarregou');
   await p.click('.tab[data-v=sem]');
