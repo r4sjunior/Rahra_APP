@@ -318,13 +318,19 @@ const numStr=(v,d)=>v==null?'':Number(v).toFixed(d).replace('.',',');
 
 /* ============ Estado ============ */
 function defaults(){
-  return {v:2,yellow:90,def:{tm:190,pa:2,conv:30},consultants:[],weeks:[],entries:{},monthGoals:{},demo:false};
+  return {v:2,yellow:90,def:{tm:190,pa:2,conv:30},consultants:[],weeks:[],entries:{},monthGoals:{},weekActuals:{},monthActuals:{},monthStore:{},demo:false};
 }
 /* Saneia tudo que vem do armazenamento ou de um backup: ids viram texto seguro (são usados em atributos HTML),
    datas inválidas descartam a semana e números inválidos voltam ao padrão. */
 const safeId=v=>String(v==null?'':v).replace(/[^\w-]/g,'').slice(0,40);
 const numOr=(v,d)=>{v=+v;return isFinite(v)?v:d;};
 const cleanGoals=g=>{const o={};if(g&&typeof g==='object')Object.keys(g).forEach(k=>{const n=+g[k];if(isFinite(n)&&n>=0)o[safeId(k)]=n;});return o;};
+/* Resultado real de TM/PA/conversão (digitado à mão, nunca calculado): {tm,pa,conv}, cada um opcional. */
+const cleanResult=r=>{
+  if(!r||typeof r!=='object')return null;
+  const o={};KEYS.slice(1).forEach(k=>{const n=+r[k];if(isFinite(n)&&n>=0&&!(k==='conv'&&n>100))o[k]=n;});
+  return Object.keys(o).length?o:null;
+};
 function migrate(s){
   const o=Object.assign(defaults(),s&&typeof s==='object'?s:{});
   o.v=2;o.demo=!!o.demo;
@@ -356,12 +362,27 @@ function migrate(s){
   const mg={},M=o.monthGoals&&typeof o.monthGoals==='object'?o.monthGoals:{};
   Object.keys(M).forEach(m=>{if(isMonth(m))mg[m]=cleanGoals(M[m]);});
   o.monthGoals=mg;
+  const wa={},WA=o.weekActuals&&typeof o.weekActuals==='object'?o.weekActuals:{};
+  o.weeks.forEach(w=>{const r=cleanResult(WA[w.id]);if(r)wa[w.id]=r;});
+  o.weekActuals=wa;
+  const ma={},MA=o.monthActuals&&typeof o.monthActuals==='object'?o.monthActuals:{};
+  Object.keys(MA).forEach(m=>{
+    if(!isMonth(m))return;
+    const src=MA[m];if(!src||typeof src!=='object')return;
+    const row={};o.consultants.forEach(c=>{const r=cleanResult(src[c.id]);if(r)row[c.id]=r;});
+    if(Object.keys(row).length)ma[m]=row;
+  });
+  o.monthActuals=ma;
+  const msa={},MSA=o.monthStore&&typeof o.monthStore==='object'?o.monthStore:{};
+  Object.keys(MSA).forEach(m=>{if(isMonth(m)){const r=cleanResult(MSA[m]);if(r)msa[m]=r;}});
+  o.monthStore=msa;
   return o;
 }
 /* ============ Servidor: login (Clerk) e banco (Neon) ============ */
 let S=defaults(),SERVER_V=0,ME=null,started=false;
 let dirtyS=false,fullNext=false,flushT=null,flushing=false,failN=0,USERS=null;
 const dirtyCells=new Set();
+const dirtyActuals=new Set(); /* chaves: "week|<id>|k" | "mcons|<mês>|<cid>|k" | "mstore|<mês>|k" */
 const can={
   structure:()=>!!ME&&ME.role==='admin',
   entries:()=>!!ME&&(ME.role==='admin'||ME.role==='editor'),
@@ -384,16 +405,31 @@ const cellVal=(w,c,k)=>{const e=ent(w,c);return e&&nn(e[k])!=null?+e[k]:null;};
 function save(){if(!can.structure())return false;dirtyS=true;queueFlush();return true;}
 function saveFull(){fullNext=true;save();}
 function markCell(w,c,k){dirtyCells.add(w+'|'+c+'|'+k);queueFlush();}
+function markActual(key){dirtyActuals.add(key);queueFlush();}
+function actualGet(key){
+  const p=key.split('|');
+  if(p[0]==='week')return weekActual(p[1],p[2]);
+  if(p[0]==='mcons')return monthActualCons(p[1],p[2],p[3]);
+  return monthActualStore(p[1],p[2]);
+}
+function actualSet(key,v){
+  const p=key.split('|');
+  if(p[0]==='week'){S.weekActuals[p[1]]=S.weekActuals[p[1]]||{};if(v==null)delete S.weekActuals[p[1]][p[2]];else S.weekActuals[p[1]][p[2]]=v;}
+  else if(p[0]==='mcons'){S.monthActuals[p[1]]=S.monthActuals[p[1]]||{};S.monthActuals[p[1]][p[2]]=S.monthActuals[p[1]][p[2]]||{};if(v==null)delete S.monthActuals[p[1]][p[2]][p[3]];else S.monthActuals[p[1]][p[2]][p[3]]=v;}
+  else{S.monthStore[p[1]]=S.monthStore[p[1]]||{};if(v==null)delete S.monthStore[p[1]][p[2]];else S.monthStore[p[1]][p[2]]=v;}
+}
 function queueFlush(ms){setSync('Salvando…','busy');clearTimeout(flushT);flushT=setTimeout(flush,ms==null?700:ms);}
 async function pull(){
   const r=await api('/api/state');
   const keep=[...dirtyCells].map(s=>{const p=s.split('|');return [p,cellVal(p[0],p[1],p[2])];});
+  const keepA=[...dirtyActuals].map(k=>[k,actualGet(k)]);
   S=migrate(r.state);SERVER_V=r.version;
   keep.forEach(a=>{const p=a[0],v=a[1];
     if(!S.weeks.some(w=>w.id===p[0])||!cons1(p[1]))return;
     S.entries[p[0]]=S.entries[p[0]]||{};const e=S.entries[p[0]][p[1]]=S.entries[p[0]][p[1]]||{};
     if(v==null)delete e[p[2]];else e[p[2]]=v;
   });
+  keepA.forEach(a=>actualSet(a[0],a[1]));
 }
 async function flush(){
   if(flushing){queueFlush(400);return 'busy';}
@@ -406,7 +442,7 @@ async function flush(){
         const r=await api('/api/state',{method:'PUT',body:{version:SERVER_V,state:st,replaceEntries:full}});
         SERVER_V=r.version;
       }catch(e){
-        if(e.status===409){await pull();dirtyCells.clear();render();toast('Outra pessoa alterou os cadastros ao mesmo tempo. Recarreguei os dados: repita a sua última alteração.');result='conflict';}
+        if(e.status===409){await pull();dirtyCells.clear();dirtyActuals.clear();render();toast('Outra pessoa alterou os cadastros ao mesmo tempo. Recarreguei os dados: repita a sua última alteração.');result='conflict';}
         else{dirtyS=true;fullNext=fullNext||full;throw e;}
       }
     }
@@ -417,8 +453,19 @@ async function flush(){
       try{if(cells.length)await api('/api/entries',{method:'PATCH',body:{cells:cells}});}
       catch(e){keys.forEach(k=>dirtyCells.add(k));throw e;}
     }
+    if(dirtyActuals.size){
+      const keys=[...dirtyActuals];dirtyActuals.clear();
+      const items=keys.map(s=>{
+        const p=s.split('|');
+        if(p[0]==='week')return{scope:'week',id:p[1],k:p[2],v:weekActual(p[1],p[2])};
+        if(p[0]==='mcons')return{scope:'mcons',month:p[1],cid:p[2],k:p[3],v:monthActualCons(p[1],p[2],p[3])};
+        return{scope:'mstore',month:p[1],k:p[2],v:monthActualStore(p[1],p[2])};
+      }).filter(it=>it.scope==='week'?S.weeks.some(w=>w.id===it.id):it.scope==='mcons'?!!cons1(it.cid):true);
+      try{if(items.length)await api('/api/actuals',{method:'PATCH',body:{items:items}});}
+      catch(e){keys.forEach(k=>dirtyActuals.add(k));throw e;}
+    }
     failN=0;
-    if(dirtyS||dirtyCells.size)retry=true;else setSync('Tudo salvo','ok');
+    if(dirtyS||dirtyCells.size||dirtyActuals.size)retry=true;else setSync('Tudo salvo','ok');
   }catch(e){
     failN++;
     if(e.status&&e.status<500&&e.status!==401&&e.status!==429){
@@ -432,7 +479,7 @@ async function flush(){
   return result;
 }
 async function refresh(){ /* traz o que outras pessoas lançaram */
-  if(!ME||ME.role==='pending'||document.hidden||flushing||dirtyS||dirtyCells.size)return;
+  if(!ME||ME.role==='pending'||document.hidden||flushing||dirtyS||dirtyCells.size||dirtyActuals.size)return;
   const a=document.activeElement;if(a&&a.tagName==='INPUT')return;
   try{
     const r=await api('/api/state'),n=migrate(r.state);
@@ -467,12 +514,18 @@ const cons1=id=>S.consultants.find(c=>c.id===id);
 const weeksOfMonth=m=>S.weeks.filter(w=>w.month===m).sort(byStart);
 const ent=(wid,cid)=>(S.entries[wid]&&S.entries[wid][cid])||null;
 const hasVal=e=>!!e&&KEYS.some(k=>nn(e[k])!=null);
+/* A meta de vendas é só a da própria semana (tabela 3 de Cadastros); sem meta cadastrada ali = sem meta,
+   nunca usa um valor antigo guardado na consultora (senão a meta do mês fica somada errado). */
 function goalOf(wk,cid){
   const g=wk.goals&&wk.goals[cid];
-  if(g>0)return +g;
-  const c=cons1(cid);return c&&c.goal>0?+c.goal:0;
+  return g>0?+g:0;
 }
 function consFor(ws){return S.consultants.filter(c=>c.active||ws.some(w=>hasVal(ent(w.id,c.id))));}
+/* Resultado real de ticket médio, PA e conversão: sempre digitado à mão (nunca calculado), porque são
+   proporções que não dá para reconstruir só somando os lançamentos de cada consultora/semana. */
+function weekActual(wid,k){const r=S.weekActuals[wid];return r&&r[k]!=null?+r[k]:null;}
+function monthActualCons(m,cid,k){const r=(S.monthActuals[m]||{})[cid];return r&&r[k]!=null?+r[k]:null;}
+function monthActualStore(m,k){const r=S.monthStore[m];return r&&r[k]!=null?+r[k]:null;}
 function statusOf(k,val,goal){
   if(val==null||!(goal>0))return 'none';
   const v=+Number(val).toFixed(DEC[k]),r=v/goal*100;
@@ -511,7 +564,7 @@ function totalRes(wk,cs){
   let G=0;const items=[];
   cs.forEach(c=>{G+=goalOf(wk,c.id);const e=ent(wk.id,c.id);if(hasVal(e))items.push({e:e,wk:wk});});
   const a=agg(items);
-  return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',a.tm,+wk.tm),pa:cellOf('pa',a.pa,+wk.pa),conv:cellOf('conv',a.conv,+wk.conv)};
+  return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',weekActual(wk.id,'tm'),+wk.tm),pa:cellOf('pa',weekActual(wk.id,'pa'),+wk.pa),conv:cellOf('conv',weekActual(wk.id,'conv'),+wk.conv)};
 }
 /* Meta do mês de uma consultora = soma das metas semanais dela cadastradas nas semanas do mês (tabela 3 de Cadastros). */
 function monthGoalFor(ws,cid){return ws.reduce((t,w)=>t+goalOf(w,cid),0);}
@@ -519,13 +572,13 @@ function monthRes(m,ws,cs){
   const items=[];let G=0;
   cs.forEach(c=>{G+=monthGoalFor(ws,c.id);ws.forEach(w=>{const e=ent(w.id,c.id);if(hasVal(e))items.push({e:e,wk:w});});});
   const a=agg(items);
-  return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',a.tm,mean(ws.map(w=>+w.tm))),pa:cellOf('pa',a.pa,mean(ws.map(w=>+w.pa))),conv:cellOf('conv',a.conv,mean(ws.map(w=>+w.conv)))};
+  return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',monthActualStore(m,'tm'),mean(ws.map(w=>+w.tm))),pa:cellOf('pa',monthActualStore(m,'pa'),mean(ws.map(w=>+w.pa))),conv:cellOf('conv',monthActualStore(m,'conv'),mean(ws.map(w=>+w.conv)))};
 }
 function monthResFor(m,ws,c){
   const items=[];
   ws.forEach(w=>{const e=ent(w.id,c.id);if(hasVal(e))items.push({e:e,wk:w});});
   const a=agg(items),G=monthGoalFor(ws,c.id);
-  return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',a.tm,mean(ws.map(w=>+w.tm))),pa:cellOf('pa',a.pa,mean(ws.map(w=>+w.pa))),conv:cellOf('conv',a.conv,mean(ws.map(w=>+w.conv)))};
+  return {fat:cellOf('fat',a.fat,G),tm:cellOf('tm',monthActualCons(m,c.id,'tm'),mean(ws.map(w=>+w.tm))),pa:cellOf('pa',monthActualCons(m,c.id,'pa'),mean(ws.map(w=>+w.pa))),conv:cellOf('conv',monthActualCons(m,c.id,'conv'),mean(ws.map(w=>+w.conv)))};
 }
 const wkLabel=w=>fmtShort(w.start)+' a '+fmtShort(w.end);
 
@@ -557,7 +610,16 @@ function editSnapOf(key){
   if(key==='cons')return clone(S.consultants);
   if(key==='params')return {def:clone(S.def),yellow:S.yellow};
   if(key==='weeks')return clone(S.weeks);
-  if(key==='ent'){const o={};weeksOfMonth(ui.month).forEach(w=>{o[w.id]=clone(S.entries[w.id]||{});});return o;}
+  if(key==='ent'){
+    const ent={},wa={};
+    weeksOfMonth(ui.month).forEach(w=>{ent[w.id]=clone(S.entries[w.id]||{});wa[w.id]=clone(S.weekActuals[w.id]||{});});
+    return {ent:ent,wa:wa};
+  }
+  if(key==='men'){
+    const m=ui.month,mc={};
+    S.consultants.filter(c=>c.active).forEach(c=>{mc[c.id]=clone((S.monthActuals[m]||{})[c.id]||{});});
+    return {month:m,cons:mc,store:clone(S.monthStore[m]||{})};
+  }
   return null;
 }
 function beginEdit(key){
@@ -570,7 +632,7 @@ async function saveEdit(msg){
   clearTimeout(flushT);
   const r=await flush();
   if(r==='conflict')return; /* o flush() já avisou sozinho e recarregou os dados */
-  toast((dirtyS||dirtyCells.size)?'Sem conexão agora. Vou continuar tentando salvar sozinho.':msg);
+  toast((dirtyS||dirtyCells.size||dirtyActuals.size)?'Sem conexão agora. Vou continuar tentando salvar sozinho.':msg);
 }
 function cancelEdit(){
   if(!editSnap){ui.editing=null;render();return;}
@@ -579,8 +641,8 @@ function cancelEdit(){
   else if(key==='params'){S.def=data.def;S.yellow=data.yellow;fullNext=true;dirtyS=true;}
   else if(key==='weeks'){S.weeks=data;fullNext=true;dirtyS=true;}
   else if(key==='ent'){
-    Object.keys(data).forEach(wid=>{
-      const oldE=data[wid]||{};
+    Object.keys(data.ent).forEach(wid=>{
+      const oldE=data.ent[wid]||{};
       S.entries[wid]=S.entries[wid]||{};
       const ids=new Set(Object.keys(oldE).concat(Object.keys(S.entries[wid])));
       ids.forEach(cid=>{
@@ -594,6 +656,41 @@ function cancelEdit(){
           }
         });
       });
+    });
+    Object.keys(data.wa).forEach(wid=>{
+      const oldR=data.wa[wid]||{};
+      S.weekActuals[wid]=S.weekActuals[wid]||{};
+      KEYS.slice(1).forEach(k=>{
+        const ov=oldR[k]!=null?oldR[k]:null,cur=S.weekActuals[wid],nv=cur[k]!=null?cur[k]:null;
+        if(ov!==nv){
+          if(ov==null)delete S.weekActuals[wid][k];else S.weekActuals[wid][k]=ov;
+          markActual('week|'+wid+'|'+k);
+        }
+      });
+    });
+  }
+  else if(key==='men'){
+    const m=data.month;
+    Object.keys(data.cons).forEach(cid=>{
+      const old=data.cons[cid]||{};
+      S.monthActuals[m]=S.monthActuals[m]||{};
+      const cur=S.monthActuals[m][cid]||{};
+      KEYS.slice(1).forEach(k=>{
+        const ov=old[k]!=null?old[k]:null,nv=cur[k]!=null?cur[k]:null;
+        if(ov!==nv){
+          S.monthActuals[m][cid]=S.monthActuals[m][cid]||{};
+          if(ov==null)delete S.monthActuals[m][cid][k];else S.monthActuals[m][cid][k]=ov;
+          markActual('mcons|'+m+'|'+cid+'|'+k);
+        }
+      });
+    });
+    const oldS=data.store||{};S.monthStore[m]=S.monthStore[m]||{};
+    KEYS.slice(1).forEach(k=>{
+      const ov=oldS[k]!=null?oldS[k]:null,cur=S.monthStore[m],nv=cur[k]!=null?cur[k]:null;
+      if(ov!==nv){
+        if(ov==null)delete S.monthStore[m][k];else S.monthStore[m][k]=ov;
+        markActual('mstore|'+m+'|'+k);
+      }
     });
   }
   editSnap=null;ui.editing=null;
@@ -723,7 +820,7 @@ function cadHTML(){
      '<button class="btn icon" data-act="mprev" aria-label="Mês anterior">‹</button><b style="min-width:170px;text-align:center;display:inline-block">'+esc(monthLabel(ui.month))+'</b>'+
      '<button class="btn icon" data-act="mnext" aria-label="Próximo mês">›</button></div></div></div>';
   if(!wm.length){
-    h+='<div class="empty" style="margin-top:0">Nenhuma semana cadastrada em '+esc(monthLabel(ui.month))+'.</div>';
+    h+='<div class="empty" style="margin-top:0">Nenhuma semana cadastrada em '+esc(monthLabel(ui.month))+'. Se já cadastrou esse mês antes, toque em “‹” para voltar e conferir.</div>';
   }else{
     h+='<div class="sheet-wrap"><table class="sheet"><thead><tr><th rowspan="2" class="name">Início da semana</th><th rowspan="2">Fim da semana</th><th rowspan="2">Mês</th><th colspan="3">Metas dos indicadores</th>'+
       (cs.length?'<th colspan="'+cs.length+'">Meta de vendas da semana (R$)</th>':'')+'<th rowspan="2"></th></tr><tr><th>Ticket médio (R$)</th><th>PA</th><th>Conversão (%)</th>'+
@@ -741,7 +838,9 @@ function cadHTML(){
     });
     h+='</tbody></table></div>';
   }
+  const gap=monthGap(ui.month);
   h+='<div class="add-row"><button class="btn primary" data-act="add-week"'+dis(lw)+'>Nova semana</button>'+
+     (gap?'<button class="btn" data-act="add-week-gap" data-start="'+gap.start+'" data-end="'+gap.end+'"'+dis(lw)+'>Fechar o mês ('+fmtShort(gap.start)+' a '+fmtShort(gap.end)+')</button>':'')+
      (wm.length?'<button class="btn" data-act="close-month">Salvar metas de '+esc(monthLabel(ui.month))+' e ir para o próximo mês</button>':'')+
      '</div>';
   h+=editBar('weeks',can.structure())+'</section>';
@@ -783,13 +882,14 @@ function semHTML(){
         '<td class="num c-'+r.fat.st+'" data-k="pct">'+pctText(r.fat)+'</td>'+inp('tm',2)+inp('pa',2)+inp('conv',1)+'</tr>';
     });
     const t=totalRes(w,cs);
+    const rinp=(k,d)=>'<td class="p0 num c-'+t[k].st+'" data-k="'+k+'"><input class="cell-inp" inputmode="decimal" data-b="wr:'+w.id+':'+k+'" data-live="1" value="'+(weekActual(w.id,k)==null?'':numStr(weekActual(w.id,k),d))+'" placeholder="'+(k==='conv'?'0,0':'0,00')+'" aria-label="'+LBL[k]+' real da loja"'+dis(le)+'></td>';
     h+='<tr class="total" data-w="'+w.id+'" data-tot="1"><th scope="row" class="name">Total da loja</th>'+
       '<td class="num goal" data-k="goal">'+fmtGoal('fat',t.fat.goal)+'</td>'+
       '<td class="num c-'+t.fat.st+'" data-k="fat">'+fmt('fat',t.fat.val)+'</td>'+
       '<td class="num c-'+t.fat.st+'" data-k="pct">'+pctText(t.fat)+'</td>'+
-      ['tm','pa','conv'].map(k=>'<td class="num c-'+t[k].st+'" data-k="'+k+'">'+fmt(k,t[k].val)+'</td>').join('')+'</tr>';
+      rinp('tm',2)+rinp('pa',2)+rinp('conv',1)+'</tr>';
   });
-  h+='</tbody></table></div><p class="note">O ticket médio, o PA e a conversão da loja são médias ponderadas pelo número de vendas de cada consultora. As metas de cada semana são editadas em Cadastros.</p>';
+  h+='</tbody></table></div><p class="note">O ticket médio, o PA e a conversão da loja são o resultado real digitado (não uma média calculada), porque essa conta depende de dados que não ficam guardados aqui. As metas de cada semana são editadas em Cadastros.</p>';
   h+=editBar('ent',can.entries());
   return h;
 }
@@ -800,7 +900,7 @@ function paintWeek(wid){
     const isTot=!!tr.dataset.tot;
     const res=isTot?totalRes(w,consOfWeek(w)):resForWeek(w,tr.dataset.c);
     const q=k=>tr.querySelector('[data-k="'+k+'"]');
-    KEYS.forEach(k=>{const td=q(k);if(!td)return;setSt(td,res[k].st);if(isTot)td.textContent=fmt(k,res[k].val);});
+    KEYS.forEach(k=>{const td=q(k);if(!td)return;setSt(td,res[k].st);if(isTot&&k==='fat')td.textContent=fmt(k,res[k].val);});
     const g=q('goal');if(g)g.textContent=fmtGoal('fat',res.fat.goal);
     const p=q('pct');if(p){setSt(p,res.fat.st);p.textContent=pctText(res.fat);}
   });
@@ -811,25 +911,29 @@ function menHTML(){
   const m=ui.month,ws=weeksOfMonth(m);
   if(!ws.length||!S.consultants.length)return emptyMonthHTML();
   const cs=consFor(ws),avg={tm:mean(ws.map(w=>+w.tm)),pa:mean(ws.map(w=>+w.pa)),conv:mean(ws.map(w=>+w.conv))};
-  let h='<p class="hint" style="margin:18px 2px 0">A soma das semanas de <b>'+esc(monthLabel(m))+'</b> aparece automaticamente. A meta do mês de cada consultora também é somada sozinha, a partir das metas de cada semana cadastradas em Cadastros.</p>';
+  const lm=ui.editing!=='men';
+  let h='<p class="hint" style="margin:18px 2px 0">A soma das semanas de <b>'+esc(monthLabel(m))+'</b> aparece automaticamente. A meta do mês de cada consultora também é somada sozinha, a partir das metas de cada semana cadastradas em Cadastros. Ticket médio, PA e conversão do mês são digitados à mão (clique em “Editar”), porque não dá para calcular certo só somando as semanas.</p>';
   h+='<div class="legend"><span class="lg c-ok">✓ Bateu a meta</span><span class="lg c-near">≈ Quase (a partir de '+S.yellow+'%)</span><span class="lg c-bad">✕ Abaixo da meta</span></div>';
   h+='<div class="sheet-wrap"><table class="sheet" id="mgrid"><caption class="sr">Resultado do mês</caption><thead><tr><th class="name">Consultora</th><th>Meta do mês (R$)</th>'+
     ws.map((w,i)=>'<th>Semana '+(i+1)+'<small>'+wkLabel(w)+'</small></th>').join('')+
     '<th>Total vendido</th><th>% da meta</th><th>Ticket médio<small>meta '+fmtGoal('tm',avg.tm)+'</small></th><th>PA<small>meta '+fmt('pa',avg.pa)+'</small></th><th>Conversão<small>meta '+fmt('conv',avg.conv)+'</small></th></tr></thead><tbody>';
   cs.forEach(c=>{
     const r=monthResFor(m,ws,c);
+    const rinp=(k,d)=>'<td class="p0 num c-'+r[k].st+'" data-k="'+k+'"><input class="cell-inp" inputmode="decimal" data-b="mca:'+c.id+':'+k+'" value="'+(monthActualCons(m,c.id,k)==null?'':numStr(monthActualCons(m,c.id,k),d))+'" placeholder="'+(k==='conv'?'0,0':'0,00')+'" aria-label="'+LBL[k]+' real de '+esc(c.name)+' no mês"'+dis(lm)+'></td>';
     h+='<tr data-c="'+c.id+'"><th scope="row" class="name">'+esc(c.name)+'</th>'+
       '<td class="num goal" data-k="goal">'+fmtGoal('fat',r.fat.goal)+'</td>';
     ws.forEach(w=>{const x=resForWeek(w,c.id).fat;h+='<td class="num c-'+x.st+'" data-k="w:'+w.id+'">'+fmt('fat',x.val)+'</td>';});
     h+='<td class="num c-'+r.fat.st+'" data-k="tot">'+fmt('fat',r.fat.val)+'</td><td class="num c-'+r.fat.st+'" data-k="pct">'+pctText(r.fat)+'</td>'+
-      KEYS.slice(1).map(k=>'<td class="num c-'+r[k].st+'" data-k="'+k+'">'+fmt(k,r[k].val)+'</td>').join('')+'</tr>';
+      rinp('tm',2)+rinp('pa',2)+rinp('conv',1)+'</tr>';
   });
   const t=monthRes(m,ws,cs);
+  const srinp=(k,d)=>'<td class="p0 num c-'+t[k].st+'" data-k="'+k+'"><input class="cell-inp" inputmode="decimal" data-b="msa:'+k+'" value="'+(monthActualStore(m,k)==null?'':numStr(monthActualStore(m,k),d))+'" placeholder="'+(k==='conv'?'0,0':'0,00')+'" aria-label="'+LBL[k]+' real da loja no mês"'+dis(lm)+'></td>';
   h+='<tr class="total" data-tot="1"><th scope="row" class="name">Total da loja</th><td class="num goal" data-k="goal">'+fmtGoal('fat',t.fat.goal)+'</td>';
   ws.forEach(w=>{const x=totalRes(w,cs).fat;h+='<td class="num c-'+x.st+'" data-k="w:'+w.id+'">'+fmt('fat',x.val)+'</td>';});
   h+='<td class="num c-'+t.fat.st+'" data-k="tot">'+fmt('fat',t.fat.val)+'</td><td class="num c-'+t.fat.st+'" data-k="pct">'+pctText(t.fat)+'</td>'+
-    KEYS.slice(1).map(k=>'<td class="num c-'+t[k].st+'" data-k="'+k+'">'+fmt(k,t[k].val)+'</td>').join('')+'</tr></tbody></table></div>';
-  h+='<p class="note">Cada semana é colorida pela meta semanal. O total é colorido pela meta do mês. Ticket médio, PA e conversão do mês são médias ponderadas pelo número de vendas de cada semana.</p>';
+    srinp('tm',2)+srinp('pa',2)+srinp('conv',1)+'</tr></tbody></table></div>';
+  h+='<p class="note">Cada semana é colorida pela meta semanal. O total é colorido pela meta do mês.</p>';
+  h+=editBar('men',can.entries());
   return h;
 }
 
@@ -894,17 +998,20 @@ function repModel(){
   const ncol=col;
   const cellsFor=res=>{const o=[];inds.forEach(k=>{const c=res[k];o.push({t:fmtGoal(k,c.goal),muted:1},{t:fmt(k,c.val),st:c.st},{t:pctText(c),st:c.st});});return o;};
   const summary={head:[head0,head1],rows:[],ncol:ncol};
+  /* TM/PA/conversão do resumo só existem quando o período cai certinho num mês (é quando existe um
+     resultado real digitado para usar); período com mais de um mês não tem como ser somado nem vira média. */
+  const months=[...new Set(ws.map(w=>w.month))],singleMonth=months.length===1?months[0]:null;
   const perCons=c=>{
     const items=[],gw=[];
     ws.forEach(w=>{const e=ent(w.id,c.id);if(hasVal(e)){items.push({e:e,wk:w});gw.push(w);}});
-    const a=agg(items);
-    return {fat:cellOf('fat',a.fat,gw.reduce((s,w)=>s+goalOf(w,c.id),0)),tm:cellOf('tm',a.tm,mean(gw.map(w=>+w.tm))),pa:cellOf('pa',a.pa,mean(gw.map(w=>+w.pa))),conv:cellOf('conv',a.conv,mean(gw.map(w=>+w.conv)))};
+    const a=agg(items),rc=k=>singleMonth?monthActualCons(singleMonth,c.id,k):null;
+    return {fat:cellOf('fat',a.fat,gw.reduce((s,w)=>s+goalOf(w,c.id),0)),tm:cellOf('tm',rc('tm'),mean(gw.map(w=>+w.tm))),pa:cellOf('pa',rc('pa'),mean(gw.map(w=>+w.pa))),conv:cellOf('conv',rc('conv'),mean(gw.map(w=>+w.conv)))};
   };
   cs.forEach(c=>summary.rows.push({kind:'row',cells:[{t:c.name}].concat(cellsFor(perCons(c)))}));
   const items=[];let G=0;const gw=[];
   cs.forEach(c=>ws.forEach(w=>{const e=ent(w.id,c.id);if(hasVal(e)){items.push({e:e,wk:w});gw.push(w);G+=goalOf(w,c.id);}}));
-  const a=agg(items);
-  const tot={fat:cellOf('fat',a.fat,G),tm:cellOf('tm',a.tm,mean(gw.map(w=>+w.tm))),pa:cellOf('pa',a.pa,mean(gw.map(w=>+w.pa))),conv:cellOf('conv',a.conv,mean(gw.map(w=>+w.conv)))};
+  const a=agg(items),rs=k=>singleMonth?monthActualStore(singleMonth,k):null;
+  const tot={fat:cellOf('fat',a.fat,G),tm:cellOf('tm',rs('tm'),mean(gw.map(w=>+w.tm))),pa:cellOf('pa',rs('pa'),mean(gw.map(w=>+w.pa))),conv:cellOf('conv',rs('conv'),mean(gw.map(w=>+w.conv)))};
   const filtered=R.cids.length&&cs.length<all.length;
   summary.rows.push({kind:'total',cells:[{t:filtered?'Total (selecionadas)':'Total da loja'}].concat(cellsFor(tot))});
   const detail={head:[head0,head1],rows:[],ncol:ncol};
@@ -948,7 +1055,9 @@ function relHTML(){
   h+='</div><div class="g"><span class="lab">Consultora</span><div class="chips"><button class="chip" data-act="rcons" data-id="all" aria-pressed="'+(!R.cids.length)+'">Todas</button>'+
     all.map(c=>'<button class="chip" data-act="rcons" data-id="'+c.id+'" aria-pressed="'+(R.cids.indexOf(c.id)>=0)+'">'+esc(c.name)+'</button>').join('')+'</div></div>';
   if(R.preset==='months')h+='<div class="g"><span class="lab">Indicador</span><div class="chips">'+KEYS.map(k=>'<button class="chip" data-act="rmind" data-v="'+k+'" aria-pressed="'+(R.mind===k)+'">'+LBL[k]+'</button>').join('')+'</div></div></div></section>';
-  else h+='<div class="g"><span class="lab">Indicadores</span><div class="chips">'+KEYS.map(k=>'<button class="chip" data-act="rind" data-v="'+k+'" aria-pressed="'+!!R.inds[k]+'">'+LBL[k]+'</button>').join('')+'</div></div></div></section>';
+  else h+='<div class="g"><span class="lab">Indicadores</span><div class="chips">'+
+    '<button class="chip" data-act="rind-all" aria-pressed="'+KEYS.every(k=>!!R.inds[k])+'">Todos</button>'+
+    KEYS.map(k=>'<button class="chip" data-act="rind" data-v="'+k+'" aria-pressed="'+!!R.inds[k]+'">'+LBL[k]+'</button>').join('')+'</div></div></div></section>';
   h+='<div class="actions no-print" style="justify-content:flex-start">'+
      '<button class="btn primary" data-act="rep-gen">Gerar relatório</button>'+
      '<button class="btn" data-act="rep-cancel"'+(staged?'':' disabled')+'>Cancelar</button>'+
@@ -964,7 +1073,7 @@ function relHTML(){
     if(!mm.ncons){h+='<p>Não há consultoras para este filtro nos meses escolhidos.</p></article>';return h;}
     h+=monthsTblHTML(mm);
     h+='<div class="legend"><span class="lg c-ok">✓ Bateu a meta</span><span class="lg c-near">≈ Quase (a partir de '+S.yellow+'%)</span><span class="lg c-bad">✕ Abaixo da meta</span></div>';
-    h+='<p class="note">A meta de vendas de cada mês é a soma das metas mensais das consultoras mostradas; as demais metas são a média das semanas do mês.</p>';
+    h+='<p class="note">A meta de vendas de cada mês é a soma das metas semanais das consultoras mostradas. Ticket médio, PA e conversão são o resultado real digitado na aba Mensal, não uma conta feita a partir das semanas.</p>';
     return h+'</article>';
   }
   const m=repModel();
@@ -974,7 +1083,7 @@ function relHTML(){
   if(!m.nweeks||!m.ncons){h+='<p>Não há lançamentos para este filtro. Preencha a aba Semanal ou mude o período.</p></article>';return h;}
   h+='<h3 class="sec">Resumo do período</h3>'+tblHTML(m.summary);
   h+='<div class="legend"><span class="lg c-ok">✓ Bateu a meta</span><span class="lg c-near">≈ Quase (a partir de '+S.yellow+'%)</span><span class="lg c-bad">✕ Abaixo da meta</span></div>';
-  h+='<p class="note">Considera as semanas com lançamentos. A meta de vendas é a soma das metas semanais e as demais metas são a média das semanas.</p>';
+  h+='<p class="note">Considera as semanas com lançamentos. A meta de vendas é a soma das metas semanais. Ticket médio, PA e conversão do resumo são o resultado real digitado no mês (só aparecem quando o período é um único mês); no detalhe semana a semana, cada semana mostra o resultado real digitado nela.</p>';
   h+='<h3 class="sec">Detalhe semana a semana</h3>'+tblHTML(m.detail);
   return h+'</article>';
 }
@@ -1106,7 +1215,7 @@ async function buildPDF(m){
   let lx=P.M;
   lg.forEach(l=>{const w=P.tw(l[1],8,true)+16;P.rect(lx,P.y,w,13,PDFC[l[0]][0]);P.text(l[1],lx+8,P.y+9.5,8,true,PDFC[l[0]][1],'l');lx+=w+8;});
   P.y+=18;
-  P.text('Considera as semanas com lançamentos. Meta de vendas = soma das metas semanais; demais metas = média das semanas.',P.M,P.y+6,7.5,false,'#7C6A72','l');
+  P.text('Considera as semanas com lançamentos. Meta de vendas = soma das metas semanais. TM/PA/conversão do resumo = resultado real do mês (só com período de 1 mês).',P.M,P.y+6,7.5,false,'#7C6A72','l');
   P.y+=16;
   if(P.y+70>P.H-P.M-14)hdr();
   P.text('Detalhe semana a semana',P.M,P.y+8,11,true,'#B23A5B','l');P.y+=14;
@@ -1196,7 +1305,7 @@ async function buildMonthsPDF(mm){
   let lx=P.M;
   lg.forEach(l=>{const w=P.tw(l[1],8,true)+16;P.rect(lx,P.y,w,13,PDFC[l[0]][0]);P.text(l[1],lx+8,P.y+9.5,8,true,PDFC[l[0]][1],'l');lx+=w+8;});
   P.y+=18;
-  P.text('A meta de vendas de cada mês é a soma das metas mensais das consultoras mostradas; as demais metas são a média das semanas do mês.',P.M,P.y+6,7.5,false,'#7C6A72','l',P.W-2*P.M);
+  P.text('A meta de vendas de cada mês é a soma das metas semanais. TM/PA/conversão são o resultado real digitado na aba Mensal.',P.M,P.y+6,7.5,false,'#7C6A72','l',P.W-2*P.M);
   return P.build('Rahra Semijoias');
 }
 
@@ -1223,7 +1332,7 @@ function render(){
 function applyRole(){
   $$('#view [data-b]').forEach(el=>{
     const k=el.dataset.b.split(':')[0];
-    const lock=k==='e'?!can.entries():(k==='rfrom'||k==='rto')?false:!can.structure();
+    const lock=(k==='e'||k==='wr'||k==='mca'||k==='msa')?!can.entries():(k==='rfrom'||k==='rto')?false:!can.structure();
     if(lock){el.disabled=true;el.title='Seu acesso não permite alterar isto.';}
   });
 }
@@ -1299,8 +1408,15 @@ async function boot(){
 /* ============ Edição ============ */
 function bind(el,type){
   const p=el.dataset.b.split(':'),v=el.type==='checkbox'?el.checked:el.value;
-  if(p[0]==='e'){if(!can.entries())return;}
+  const ENTRIES_PREFIX=p[0]==='e'||p[0]==='wr'||p[0]==='mca'||p[0]==='msa';
+  if(ENTRIES_PREFIX){if(!can.entries())return;}
   else if(p[0]!=='rfrom'&&p[0]!=='rto'&&!can.structure())return;
+  const invalidResult=(el,k,v,type)=>{
+    const raw=String(v).trim(),num=parseNum(raw);
+    if(raw!==''&&num==null){el.classList.add('invalid');if(type==='change')toast('Digite só números.');return true;}
+    if(num!=null&&(num<0||(k==='conv'&&num>100))){el.classList.add('invalid');if(type==='change')toast(k==='conv'?'A conversão deve ficar entre 0 e 100%.':'Digite um valor válido, sem negativos.');return true;}
+    return false;
+  };
   switch(p[0]){
     case 'e':{
       const wid=p[1],cid=p[2],k=p[3];
@@ -1314,6 +1430,35 @@ function bind(el,type){
       paintWeek(wid);renderStrip();
       markCell(wid,cid,k);
       return;}
+    case 'wr':{
+      const wid=p[1],k=p[2],raw=String(v).trim();
+      if(invalidResult(el,k,v,type))return;
+      const num=parseNum(raw);
+      el.classList.remove('invalid');
+      S.weekActuals[wid]=S.weekActuals[wid]||{};
+      if(raw==='')delete S.weekActuals[wid][k];else S.weekActuals[wid][k]=num;
+      if(type==='change'&&num!=null)el.value=numStr(num,DEC[k]);
+      paintWeek(wid);renderStrip();
+      markActual('week|'+wid+'|'+k);
+      return;}
+    case 'mca':{
+      const cid=p[1],k=p[2],raw=String(v).trim(),m=ui.month;
+      if(invalidResult(el,k,v,type))return;
+      const num=parseNum(raw);
+      el.classList.remove('invalid');
+      S.monthActuals[m]=S.monthActuals[m]||{};S.monthActuals[m][cid]=S.monthActuals[m][cid]||{};
+      if(raw==='')delete S.monthActuals[m][cid][k];else S.monthActuals[m][cid][k]=num;
+      markActual('mcons|'+m+'|'+cid+'|'+k);
+      render();return;}
+    case 'msa':{
+      const k=p[1],raw=String(v).trim(),m=ui.month;
+      if(invalidResult(el,k,v,type))return;
+      const num=parseNum(raw);
+      el.classList.remove('invalid');
+      S.monthStore[m]=S.monthStore[m]||{};
+      if(raw==='')delete S.monthStore[m][k];else S.monthStore[m][k]=num;
+      markActual('mstore|'+m+'|'+k);
+      render();return;}
     case 'c':{
       const c=cons1(p[1]);if(!c)return;
       if(p[2]==='name'){const t=String(v).trim();if(!t){el.value=c.name;return;}c.name=t;$$('[data-cn="'+c.id+'"]').forEach(x=>{x.textContent=t;});}
@@ -1355,15 +1500,21 @@ function addCons(){
   S.consultants.push({id:uid(),name:nm,active:true,goal:0});
   save();render();toast(nm+' adicionada.');
 }
-function addWeek(){
+function addWeek(start,end){
   const last=S.weeks.slice().sort(byStart).pop();
-  const start=last?iso(addDays(parse(last.end),1)):iso(monday(new Date())),end=iso(addDays(parse(start),6));
+  if(!start){start=last?iso(addDays(parse(last.end),1)):iso(monday(new Date()));end=iso(addDays(parse(start),6));}
   const w={id:uid(),start:start,end:end,month:monthOf(start,end),tm:S.def.tm,pa:S.def.pa,conv:S.def.conv,goals:{}};
   /* Começa com as metas da semana anterior (ponto de partida), já que cada semana costuma ter um valor próprio para ajustar. */
   if(last)S.consultants.filter(c=>c.active).forEach(c=>{if(last.goals[c.id]>0)w.goals[c.id]=last.goals[c.id];});
   S.weeks.push(w);ui.month=w.month;save();render();toast('Semana adicionada: '+wkLabel(w)+'. Ajuste as datas e as metas se precisar.');
 }
-const ADMIN_ACTS=['add-cons','del-cons','add-week','del-week','close-month','reset','import-backup','export-backup','undo'];
+/* Dias do mês que sobraram depois da última semana cadastrada (ex.: semanas de 7 em 7 dias deixam de 1 a 6 dias soltos no fim). */
+function monthGap(m){
+  const ws=weeksOfMonth(m);if(!ws.length)return null;
+  const start=iso(addDays(parse(ws[ws.length-1].end),1)),end=rangeMonth(m).to;
+  return start<=end?{start:start,end:end}:null;
+}
+const ADMIN_ACTS=['add-cons','del-cons','add-week','add-week-gap','del-week','close-month','reset','import-backup','export-backup','undo'];
 function act(a,el){
   const v=el.dataset.v;
   if(ADMIN_ACTS.indexOf(a)>=0&&!can.structure())return;
@@ -1380,16 +1531,18 @@ function act(a,el){
       Object.keys(S.entries).forEach(w=>{delete S.entries[w][id];});
       S.weeks.forEach(w=>{delete w.goals[id];});
       Object.keys(S.monthGoals).forEach(m=>{delete S.monthGoals[m][id];});
+      Object.keys(S.monthActuals).forEach(m=>{delete S.monthActuals[m][id];});
       ui.rep.cids=ui.rep.cids.filter(x=>x!==id);
       save();render();toast('Consultora excluída.');
     });break;
     case 'add-week':addWeek();break;
+    case 'add-week-gap':addWeek(el.dataset.start,el.dataset.end);break;
     case 'close-month':{
       const cur=monthLabel(ui.month);ui.month=addMonths(ui.month,1);render();window.scrollTo(0,0);
       toast('Metas de '+cur+' salvas. Cadastre agora as metas de '+monthLabel(ui.month)+'.');
       break;}
     case 'del-week':twoStep(el,()=>{
-      const id=el.dataset.id;snapshot('exclusão de semana');S.weeks=S.weeks.filter(w=>w.id!==id);delete S.entries[id];
+      const id=el.dataset.id;snapshot('exclusão de semana');S.weeks=S.weeks.filter(w=>w.id!==id);delete S.entries[id];delete S.weekActuals[id];
       save();render();toast('Semana excluída.');
     });break;
     case 'rpreset':
@@ -1401,16 +1554,17 @@ function act(a,el){
       else{const id=el.dataset.id,i=ui.rep.cids.indexOf(id);if(i>=0)ui.rep.cids.splice(i,1);else ui.rep.cids.push(id);}
       render();break;}
     case 'rind':ui.rep.inds[v]=!ui.rep.inds[v];render();break;
+    case 'rind-all':{const all=KEYS.every(k=>!!ui.rep.inds[k]);KEYS.forEach(k=>ui.rep.inds[k]=!all);render();break;}
     case 'rmonth':{const i=ui.rep.months.indexOf(v);if(i>=0)ui.rep.months.splice(i,1);else ui.rep.months.push(v);render();break;}
     case 'rmind':ui.rep.mind=v;render();break;
     case 'rep-gen':repApplied=clone(ui.rep);repAppliedMonth=ui.month;render();window.scrollTo(0,0);toast('Relatório gerado.');break;
     case 'rep-cancel':ui.rep=clone(repApplied);render();toast('Filtros voltaram ao último relatório gerado.');break;
     case 'edit':{
       const key=el.dataset.key;
-      if(!(key==='ent'?can.entries():can.structure()))return;
+      if(!((key==='ent'||key==='men')?can.entries():can.structure()))return;
       beginEdit(key);break;}
     case 'save-edit':{
-      const lbl={cons:'Consultoras salvas.',params:'Metas dos indicadores salvas.',weeks:'Semanas e metas salvas.',ent:'Lançamentos salvos.'}[el.dataset.key]||'Salvo.';
+      const lbl={cons:'Consultoras salvas.',params:'Metas dos indicadores salvas.',weeks:'Semanas e metas salvas.',ent:'Lançamentos salvos.',men:'Resultados do mês salvos.'}[el.dataset.key]||'Salvo.';
       saveEdit(lbl);break;}
     case 'cancel-edit':cancelEdit();break;
     case 'print':doPrint();break;
@@ -1457,8 +1611,8 @@ document.addEventListener('keydown',e=>{
   if(n){const nx=n.children[i].querySelector('.cell-inp');nx.focus();nx.select();}
 });
 document.addEventListener('change',e=>{const s=e.target.closest('[data-role]');if(s)setUserRole(s.dataset.role,s.value);});
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&(dirtyS||dirtyCells.size))queueFlush(0);});
-window.addEventListener('beforeunload',e=>{if(dirtyS||dirtyCells.size||flushing){e.preventDefault();e.returnValue='';}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&(dirtyS||dirtyCells.size||dirtyActuals.size))queueFlush(0);});
+window.addEventListener('beforeunload',e=>{if(dirtyS||dirtyCells.size||dirtyActuals.size||flushing){e.preventDefault();e.returnValue='';}});
 try{const ic=document.createElement('link');ic.rel='icon';ic.href=LOGO;document.head.appendChild(ic);}catch(e){}
 
 boot();

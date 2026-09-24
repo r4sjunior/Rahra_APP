@@ -10,6 +10,7 @@ import puppeteer from 'puppeteer-core';
 import { upsertUser, HttpError } from '../lib/core.js';
 import { make as makeState } from '../api/state.js';
 import { make as makeEntries } from '../api/entries.js';
+import { make as makeActuals } from '../api/actuals.js';
 import { make as makeUsers } from '../api/users.js';
 import { make as makeMe } from '../api/me.js';
 
@@ -33,7 +34,7 @@ const auth = async req => {
   const user = await upsertUser(db, { clerkId: id, email, name: email.split('@')[0], adminEmails: ADMINS, verified: true });
   return { db, user };
 };
-const H = { '/api/state': makeState(auth), '/api/entries': makeEntries(auth), '/api/users': makeUsers(auth), '/api/me': makeMe(auth) };
+const H = { '/api/state': makeState(auth), '/api/entries': makeEntries(auth), '/api/actuals': makeActuals(auth), '/api/users': makeUsers(auth), '/api/me': makeMe(auth) };
 const MIME = { '.html': 'text/html; charset=utf-8', '.png': 'image/png' };
 
 const server = http.createServer(async (req, res) => {
@@ -126,6 +127,22 @@ try {
   assert.deepEqual((await db.query('select goal::float8 as goal from week_goals order by goal')).rows, [{ goal: 4000 }, { goal: 5000 }]);
   ok('cadastros vão para o banco (consultoras, semana e metas por semana) só depois de Salvar');
 
+  await p.click('[data-act=edit][data-key=weeks]');
+  const gapBtn = await p.$('[data-act=add-week-gap]');
+  if (gapBtn) {
+    const gap = await p.evaluate(b => ({ start: b.dataset.start, end: b.dataset.end }), gapBtn);
+    await gapBtn.click();
+    const lastStart = await p.$$eval('input[data-b^="w:"][data-b$=":start"]', a => a[a.length - 1].value);
+    const lastEnd = await p.$$eval('input[data-b^="w:"][data-b$=":end"]', a => a[a.length - 1].value);
+    assert.equal(lastStart, gap.start); assert.equal(lastEnd, gap.end);
+    await p.click('[data-act=save-edit][data-key=weeks]');
+    await saved(p, 'salvou período de fechamento do mês');
+    assert.equal((await db.query('select count(*)::int as n from weeks')).rows[0].n, 2);
+    ok('"Fechar o mês" adiciona um período até o fim do mês, mesmo com menos de 7 dias');
+  } else {
+    await p.click('[data-act=cancel-edit][data-key=weeks]');
+  }
+
   await p.click('.tab[data-v=sem]');
   await p.click('[data-act=edit][data-key=ent]');
   const fat = await p.$('#grid input[data-b$=":fat"]');
@@ -144,6 +161,33 @@ try {
   assert.deepEqual((await db.query('select fat::float8 as fat from entries')).rows, [{ fat: 1234.5 }]);
   ok('cancelar uma edição de lançamento descarta o que foi digitado, sem gravar no banco');
 
+  await p.click('[data-act=edit][data-key=ent]');
+  const rtm = await p.$('#grid input[data-b^="wr:"][data-b$=":tm"]');
+  await rtm.focus(); await p.keyboard.type('217,66'); await p.keyboard.press('Tab');
+  const rpa = await p.$('#grid input[data-b^="wr:"][data-b$=":pa"]');
+  await rpa.focus(); await p.keyboard.type('2,66'); await p.keyboard.press('Tab');
+  await p.click('[data-act=save-edit][data-key=ent]');
+  await saved(p, 'salvou resultado real da semana');
+  const wkAct = (await db.query('select tm::float8 as tm, pa::float8 as pa from week_actuals')).rows;
+  assert.equal(wkAct.length, 1);
+  assert.equal(wkAct[0].tm, 217.66); assert.equal(wkAct[0].pa, 2.66);
+  ok('ticket médio e PA reais da loja na semana são digitados à mão (não calculados) e salvos');
+
+  await p.click('.tab[data-v=men]');
+  await until(p, () => document.querySelector('#mgrid'), 'mensal carregou');
+  await p.click('[data-act=edit][data-key=men]');
+  const mcaTm = await p.$('#mgrid input[data-b^="mca:"][data-b$=":tm"]');
+  await mcaTm.focus(); await p.keyboard.type('220'); await p.keyboard.press('Tab');
+  const msaConv = await p.$('input[data-b="msa:conv"]');
+  await msaConv.focus(); await p.keyboard.type('40'); await p.keyboard.press('Tab');
+  await p.click('[data-act=save-edit][data-key=men]');
+  await saved(p, 'salvou resultado real do mês');
+  const mca = (await db.query("select tm::float8 as tm from month_actuals where consultant_id=(select id from consultants where name='Ana Paula')")).rows;
+  assert.equal(mca[0].tm, 220);
+  const msa = (await db.query('select conv::float8 as conv from month_store_actuals')).rows;
+  assert.equal(msa[0].conv, 40);
+  ok('ticket médio da consultora e conversão da loja no mês são digitados à mão (não calculados) e salvos');
+
   await p.click('.tab[data-v=rel]');
   await until(p, () => document.querySelector('#rep'), 'relatório carregou');
   const repBefore = await p.$eval('#rep', e => e.textContent);
@@ -155,6 +199,15 @@ try {
   await p.waitForFunction(before => document.querySelector('#rep').textContent !== before, {}, repBefore);
   assert.equal(await p.$eval('[data-act=rep-cancel]', e => e.disabled), true, 'depois de gerar, Cancelar volta a ficar desabilitado');
   ok('relatório só atualiza depois de clicar em "Gerar relatório"');
+
+  assert.equal(await p.$eval('[data-act=rind-all]', e => e.getAttribute('aria-pressed')), 'false', '"Todos" não fica marcado com um indicador desligado');
+  await p.click('[data-act=rind-all]');
+  assert.equal(await p.$$eval('[data-act=rind]', a => a.every(x => x.getAttribute('aria-pressed') === 'true')), true, '"Todos" liga todos os indicadores de uma vez');
+  await p.click('[data-act=rind-all]');
+  assert.equal(await p.$$eval('[data-act=rind]', a => a.every(x => x.getAttribute('aria-pressed') === 'false')), true, 'clicar de novo em "Todos" desliga todos');
+  await p.click('[data-act=rind-all]');
+  await p.click('[data-act=rep-gen]');
+  ok('botão "Todos" liga/desliga todos os indicadores do relatório de uma vez');
 
   await p.reload();
   await loaded(p, 'recarregou');
@@ -202,8 +255,14 @@ try {
   await saved(ed, 'editor salvou');
   assert.equal((await db.query('select updated_by from entries where tm is not null')).rows[0].updated_by, ED.email);
   await ed.click('.tab[data-v=men]');
-  assert.equal(await ed.$$eval('#mgrid input', a => a.length), 0, 'meta do mês agora é só a soma das metas semanais, sem campo para editar');
-  assert.equal(await ed.$eval('#mgrid tbody tr td.goal', e => e.textContent.replace(/\s/g, ' ')), 'R$ 5.000', 'meta do mês de Ana Paula = soma das metas semanais dela');
+  assert.equal(await ed.$$eval('#mgrid td.goal input', a => a.length), 0, 'meta do mês agora é só a soma das metas semanais, sem campo para editar');
+  assert.equal(await ed.$$eval('#mgrid input[data-b^="mca:"], #mgrid input[data-b^="msa:"]', a => a.length > 0 && a.every(i => i.disabled)), true, 'ticket médio/PA/conversão do mês existem mas ficam travados até clicar em "Editar"');
+  const anaGoalSum = (await db.query(
+    `select coalesce(sum(wg.goal),0)::float8 as total from week_goals wg
+     join consultants c on c.id = wg.consultant_id where c.name = 'Ana Paula'`
+  )).rows[0].total;
+  const brl0 = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 });
+  assert.equal(await ed.$eval('#mgrid tbody tr td.goal', e => e.textContent.replace(/\s/g, ' ')), brl0.format(anaGoalSum).replace(/\s/g, ' '), 'meta do mês de Ana Paula = soma das metas semanais dela (5.000 por semana cadastrada)');
   assert.equal(await fetchAs(ed, '/api/state', { method: 'PUT', body: '{}' }), 403);
   assert.equal(await fetchAs(ed, '/api/users'), 403);
   ok('editor lança valores, não vê Cadastros/Usuários, meta do mês é só leitura e a API recusa o resto');

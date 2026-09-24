@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
-import { loadState, saveState, patchEntries, upsertUser, listUsers, setRole, HttpError } from '../lib/core.js';
+import { loadState, saveState, patchEntries, patchActuals, upsertUser, listUsers, setRole, HttpError } from '../lib/core.js';
 
 const pg = new PGlite();
 const wrap = q => ({ rows: q.rows, rowCount: q.affectedRows ?? q.rows.length });
@@ -125,13 +125,55 @@ await ok('células inválidas e ids inexistentes', async () => {
   await patchEntries(db, editor, { cells: [{ w: 'nao-existe', c: 'c1', k: 'fat', v: 5 }] }); // ignorada, sem erro
   assert.equal((await loadState(db)).state.entries['nao-existe'], undefined);
 });
-await ok('excluir consultora e semana apaga em cascata', async () => {
+console.log('Resultado real (TM/PA/conversão)');
+await ok('editor lança resultado real; viewer e pendente não', async () => {
+  await rejects(() => patchActuals(db, { ...ana, role: 'viewer' }, { items: [{ scope: 'week', id: 'w1', k: 'tm', v: 200 }] }), 403);
+  await rejects(() => patchActuals(db, eve, { items: [{ scope: 'week', id: 'w1', k: 'tm', v: 200 }] }), 403);
+  await patchActuals(db, editor, { items: [
+    { scope: 'week', id: 'w1', k: 'tm', v: 217.66 },
+    { scope: 'week', id: 'w1', k: 'pa', v: 2.66 },
+    { scope: 'week', id: 'w1', k: 'conv', v: 45 },
+    { scope: 'mcons', month: '2026-09', cid: 'c1', k: 'tm', v: 220 },
+    { scope: 'mstore', month: '2026-09', k: 'conv', v: 40 },
+  ] });
+  const r = await loadState(db);
+  assert.deepEqual(r.state.weekActuals.w1, { tm: 217.66, pa: 2.66, conv: 45 });
+  assert.deepEqual(r.state.monthActuals['2026-09'].c1, { tm: 220 });
+  assert.deepEqual(r.state.monthStore['2026-09'], { conv: 40 });
+  assert.equal(r.version, version, 'lançar resultado real não sobe a versão dos cadastros');
+});
+await ok('itens inválidos de resultado real são rejeitados', async () => {
+  await rejects(() => patchActuals(db, editor, { items: [{ scope: 'week', id: 'w1', k: 'conv', v: 150 }] }), 400);
+  await rejects(() => patchActuals(db, editor, { items: [{ scope: 'week', id: 'w1', k: 'fat', v: 10 }] }), 400);
+  await rejects(() => patchActuals(db, editor, { items: [{ scope: 'mcons', month: '2026-9', cid: 'c1', k: 'tm', v: 10 }] }), 400);
+  await rejects(() => patchActuals(db, editor, { items: [{ scope: 'outro', id: 'w1', k: 'tm', v: 10 }] }), 400);
+  await patchActuals(db, editor, { items: [{ scope: 'week', id: 'nao-existe', k: 'tm', v: 10 }] }); // ignorado, sem erro
+});
+await ok('apagar todos os indicadores de uma linha de resultado real a remove', async () => {
+  await patchActuals(db, editor, { items: [
+    { scope: 'week', id: 'w1', k: 'tm', v: null }, { scope: 'week', id: 'w1', k: 'pa', v: null }, { scope: 'week', id: 'w1', k: 'conv', v: null },
+  ] });
+  assert.equal((await loadState(db)).state.weekActuals.w1, undefined);
+});
+
+console.log('Cadastros (exclusão)');
+await ok('excluir consultora e semana apaga em cascata (inclusive resultado real)', async () => {
+  await patchActuals(db, editor, { items: [
+    { scope: 'week', id: 'w1', k: 'tm', v: 210 }, // w1 vai ser excluída
+    { scope: 'week', id: 'w2', k: 'tm', v: 195 }, // w2 continua
+    { scope: 'mcons', month: '2026-09', cid: 'c1', k: 'pa', v: 2.5 }, // c1 continua
+    { scope: 'mcons', month: '2026-09', cid: 'c2', k: 'pa', v: 3 },   // c2 vai ser excluída
+  ] });
   const s = base(); s.consultants = [s.consultants[0]]; s.weeks = [s.weeks[1]]; s.entries = {};
   const out = await saveState(db, admin, { version, state: s }); version = out.version;
   const r = await loadState(db);
   assert.equal(r.state.consultants.length, 1); assert.equal(r.state.weeks.length, 1);
   assert.deepEqual(r.state.entries, {});
   assert.equal((await db.query('select count(*)::int as n from week_goals')).rows[0].n, 0);
+  assert.equal((await db.query("select count(*)::int as n from week_actuals where week_id='w1'")).rows[0].n, 0, 'semana w1 excluída leva o resultado real dela');
+  assert.equal((await db.query("select count(*)::int as n from month_actuals where consultant_id='c2'")).rows[0].n, 0, 'consultora c2 excluída leva o resultado real dela');
+  assert.equal((await db.query("select tm::float8 as tm from week_actuals where week_id='w2'")).rows[0].tm, 195, 'resultado real de w2 (que continua existindo) não foi mexido');
+  assert.equal((await db.query("select pa::float8 as pa from month_actuals where consultant_id='c1'")).rows[0].pa, 2.5, 'resultado real de c1 (que continua existindo) não foi mexido');
 });
 
 console.log('Usuários');
