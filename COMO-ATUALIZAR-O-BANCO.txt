@@ -1,0 +1,57 @@
+COMO ATUALIZAR O BANCO DE DADOS (Neon) DEPOIS DE UMA MUDANÇA NO SISTEMA
+========================================================================
+
+Quando o Claude avisar que uma mudança criou tabelas novas no banco, siga
+este passo a passo. É rápido e pode ser repetido sempre que precisar —
+o script não apaga nem duplica nada, só cria o que ainda não existe.
+
+
+PASSO 1 — Pegar a connection string do banco (DATABASE_URL)
+-------------------------------------------------------------
+Opção A (pela Vercel):
+  1. Entre em https://vercel.com e abra o projeto "rahra-app".
+  2. Vá em Settings > Environment Variables.
+  3. Encontre a variável "DATABASE_URL" e copie o valor (clique no
+     ícone de olho para revelar, se estiver escondida).
+
+Opção B (pelo Neon):
+  1. Entre em https://neon.tech e abra o seu projeto.
+  2. Na tela principal, clique em "Connection string" e copie.
+
+
+PASSO 2 — Abrir o terminal na pasta do projeto
+-------------------------------------------------------------
+No Claude Code, PowerShell ou no terminal do VS Code, entre na pasta:
+
+  cd C:\Users\Ras\Documents\GitHub\Rahra_APP
+
+
+PASSO 3 — Rodar o script de atualização
+-------------------------------------------------------------
+No PowerShell, rode os dois comandos abaixo (aperte Enter depois de cada um).
+Troque o texto entre aspas pela connection string que você copiou no Passo 1:
+
+  $env:DATABASE_URL = "cole aqui a connection string"
+  npm run db:setup
+
+
+PASSO 4 — Conferir se deu certo
+-------------------------------------------------------------
+Se aparecer uma linha assim, funcionou:
+
+  Banco pronto. Tabelas: app_users, audit_log, consultants, entries,
+  month_actuals, month_goals, month_store_actuals, settings, week_actuals,
+  week_goals, weeks
+
+Se aparecer "Falhou: ..." em vermelho, confira se colou a connection
+string certa (sem espaços a mais) e tente de novo.
+
+Depois disso, é só recarregar o site (rahra-app na Vercel) que o erro
+"Não consegui carregar os dados / Erro no servidor" desaparece.
+
+
+OBSERVAÇÃO
+-------------------------------------------------------------
+Nunca compartilhe a DATABASE_URL publicamente (ela dá acesso total ao
+banco). Se precisar pedir ajuda para o Claude rodar esse passo por você,
+pode colar a connection string na conversa — ela fica só naquela sessão.
