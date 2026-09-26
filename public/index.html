@@ -1517,11 +1517,26 @@ function addCons(){
   save();render();toast(nm+' adicionada.');
 }
 function addWeek(start,end){
-  const last=S.weeks.slice().sort(byStart).pop();
-  if(!start){start=last?iso(addDays(parse(last.end),1)):iso(monday(new Date()));end=iso(addDays(parse(start),6));}
+  /* Continua a partir da última semana do MÊS QUE ESTÁ SENDO VISTO (não da última semana cadastrada em
+     qualquer mês), senão cadastrar um mês retroativo (ex.: agosto, depois de já ter setembro) pulava
+     direto para depois do mês mais recente em vez de ficar dentro do mês vigente. */
+  if(!start){
+    const wm=weeksOfMonth(ui.month).slice().sort(byStart);
+    if(wm.length)start=iso(addDays(parse(wm[wm.length-1].end),1));
+    else{
+      const r=rangeMonth(ui.month),t=iso(new Date());
+      /* Dentro do mês vigente, começa no dia de hoje (semana correndo); em outro mês (retroativo ou
+         futuro) começa no dia 1, que garante a semana inteira dentro do mês mesmo se o dia 1 não cair
+         numa segunda-feira. */
+      start=(t>=r.from&&t<=r.to)?iso(monday(new Date())):r.from;
+    }
+    end=iso(addDays(parse(start),6));
+  }
+  /* Metas de partida: copia da semana anterior de verdade (por data), não da última cadastrada — assim
+     um mês retroativo não herda metas de um mês futuro que só foi cadastrado antes dele. */
+  const prev=S.weeks.filter(w=>w.end<start).sort(byStart).pop();
   const w={id:uid(),start:start,end:end,month:monthOf(start,end),tm:S.def.tm,pa:S.def.pa,conv:S.def.conv,goals:{}};
-  /* Começa com as metas da semana anterior (ponto de partida), já que cada semana costuma ter um valor próprio para ajustar. */
-  if(last)S.consultants.filter(c=>c.active).forEach(c=>{if(last.goals[c.id]>0)w.goals[c.id]=last.goals[c.id];});
+  if(prev)S.consultants.filter(c=>c.active).forEach(c=>{if(prev.goals[c.id]>0)w.goals[c.id]=prev.goals[c.id];});
   S.weeks.push(w);ui.month=w.month;save();render();toast('Semana adicionada: '+wkLabel(w)+'. Ajuste as datas e as metas se precisar.');
 }
 /* Dias do mês que sobraram depois da última semana cadastrada (ex.: semanas de 7 em 7 dias deixam de 1 a 6 dias soltos no fim). */

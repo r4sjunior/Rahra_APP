@@ -143,6 +143,21 @@ try {
     await p.click('[data-act=cancel-edit][data-key=weeks]');
   }
 
+  const monthBefore = await p.$eval('.toolbar b', e => e.textContent);
+  await p.click('[data-act=mprev]');
+  const monthAfterPrev = await p.$eval('.toolbar b', e => e.textContent);
+  assert.notEqual(monthAfterPrev, monthBefore, 'navegou para o mês anterior');
+  await p.click('[data-act=edit][data-key=weeks]');
+  await p.click('[data-act=add-week]');
+  const monthOfNewWeek = await p.$eval('.toolbar b', e => e.textContent);
+  assert.equal(monthOfNewWeek, monthAfterPrev, 'semana nova cadastrada num mês retroativo fica nesse mês, sem pular para a frente');
+  await p.click('[data-act=save-edit][data-key=weeks]');
+  await saved(p, 'salvou semana de mês retroativo');
+  const monthsInDb = (await db.query('select distinct month from weeks order by month')).rows.map(r => r.month.trim());
+  assert.ok(monthsInDb.length >= 2, 'agora existe semana tanto no mês retroativo quanto no mês seguinte');
+  ok('cadastrar uma semana num mês anterior (retroativo) não pula para o mês seguinte');
+  await p.click('[data-act=mnext]');
+
   await p.click('.tab[data-v=sem]');
   await p.click('[data-act=edit][data-key=ent]');
   const fat = await p.$('#grid input[data-b$=":fat"]');
