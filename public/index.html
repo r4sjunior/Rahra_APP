@@ -813,8 +813,11 @@ function cadHTML(){
     '<p class="hint" style="margin:12px 0 0">Verde: bateu a meta. Amarelo: chegou a <b id="ylw">'+S.yellow+'%</b> ou mais da meta. Vermelho: abaixo disso.</p>'+
     editBar('params',can.structure())+'</section>';
 
-  const cs=S.consultants.filter(c=>c.active);
   const wm=weeksOfMonth(ui.month);
+  /* Mostra a coluna de quem está ativa hoje OU já tinha meta/lançamento nesse mês: assim uma vendedora
+     que saiu continua editável nos meses em que trabalhou, mesmo já desmarcada como "Ativa" — não é
+     preciso mantê-la ativa para sempre só para não perder o cadastro dela em meses passados. */
+  const cs=S.consultants.filter(c=>c.active||wm.some(w=>(w.goals&&w.goals[c.id]>0)||hasVal(ent(w.id,c.id))));
   h+='<section class="card"><h2 class="sec">3. Semanas e metas</h2><p class="hint">Cadastre aqui as semanas e a meta de vendas de cada consultora só do mês em edição — cada semana tem seu próprio valor. Clique em “Editar” para alterar; os meses já fechados ficam disponíveis na aba Relatórios.</p>';
   h+='<div class="toolbar" style="margin-bottom:12px"><div class="g"><span class="lab">Mês em edição</span><div class="nav" style="display:flex;align-items:center;gap:8px">'+
      '<button class="btn icon" data-act="mprev" aria-label="Mês anterior">‹</button><b style="min-width:170px;text-align:center;display:inline-block">'+esc(monthLabel(ui.month))+'</b>'+
@@ -977,16 +980,21 @@ function monthsModel(){
     nmonths:months.length,ncons:cs.length,nind:inds.length
   };
 }
+/* Cada mês ganha duas colunas (Meta/Resultado, +% da meta em Vendas) para mostrar, lado a lado, a meta
+   individual de cada consultora (soma das metas semanais dela) e a meta da loja (linha Total). */
 function monthsTblHTML(mm,k){
+  const pct=k==='fat';
   let h='<div class="sheet-wrap"><table class="sheet"><thead><tr><th class="name" rowspan="2">Consultora</th>'+
-    mm.cols.map(c=>'<th>'+esc(monthLabel(c.m))+'</th>').join('')+'</tr><tr>'+
-    mm.cols.map(c=>'<th>'+(c.res[k].goal>0?'Meta '+fmtGoal(k,c.res[k].goal):'sem meta')+'</th>').join('')+'</tr></thead><tbody>';
+    mm.cols.map(c=>'<th colspan="'+(pct?3:2)+'">'+esc(monthLabel(c.m))+'</th>').join('')+'</tr><tr>'+
+    mm.cols.map(()=>'<th>Meta</th><th>'+(pct?'Vendido':'Resultado')+'</th>'+(pct?'<th>% da meta</th>':'')).join('')+
+    '</tr></thead><tbody>';
+  const cellsFor=r=>'<td class="num goal">'+fmtGoal(k,r.goal)+'</td><td class="num c-'+r.st+'">'+fmt(k,r.val)+'</td>'+(pct?'<td class="num c-'+r.st+'">'+pctText(r)+'</td>':'');
   mm.cs.forEach(cons=>{
     h+='<tr><th scope="row" class="name">'+esc(cons.name)+'</th>'+
-      mm.cols.map(c=>{const r=monthResFor(c.m,c.ws,cons)[k];return '<td class="num c-'+r.st+'">'+fmt(k,r.val)+'</td>';}).join('')+'</tr>';
+      mm.cols.map(c=>cellsFor(monthResFor(c.m,c.ws,cons)[k])).join('')+'</tr>';
   });
   h+='<tr class="total"><th scope="row" class="name">'+(mm.filtered?'Total (selecionadas)':'Total da loja')+'</th>'+
-    mm.cols.map(c=>'<td class="num c-'+c.res[k].st+'">'+fmt(k,c.res[k].val)+'</td>').join('')+'</tr>';
+    mm.cols.map(c=>cellsFor(c.res[k])).join('')+'</tr>';
   return h+'</tbody></table></div>';
 }
 function repModel(){
@@ -1248,11 +1256,16 @@ function saveMonthsCSV(){
   if(!mm.nind||!mm.nmonths||!mm.ncons){toast('Não há dados para este filtro.');return;}
   const lines=[['Comparativo entre meses - '+mm.period],[]];
   mm.inds.forEach(k=>{
-    lines.push([LBL[k]],
-      ['Consultora'].concat(mm.cols.map(c=>monthLabel(c.m))),
-      ['Meta do mês'].concat(mm.cols.map(c=>fmtGoal(k,c.res[k].goal))));
-    mm.cs.forEach(cons=>lines.push([cons.name].concat(mm.cols.map(c=>fmt(k,monthResFor(c.m,c.ws,cons)[k].val)))));
-    lines.push([mm.filtered?'Total (selecionadas)':'Total da loja'].concat(mm.cols.map(c=>fmt(k,c.res[k].val))),[]);
+    const head=['Consultora'];mm.cols.forEach(c=>head.push(monthLabel(c.m)+' - meta',monthLabel(c.m)+' - resultado'));
+    lines.push([LBL[k]],head);
+    mm.cs.forEach(cons=>{
+      const row=[cons.name];
+      mm.cols.forEach(c=>{const r=monthResFor(c.m,c.ws,cons)[k];row.push(fmtGoal(k,r.goal),fmt(k,r.val));});
+      lines.push(row);
+    });
+    const trow=[mm.filtered?'Total (selecionadas)':'Total da loja'];
+    mm.cols.forEach(c=>trow.push(fmtGoal(k,c.res[k].goal),fmt(k,c.res[k].val)));
+    lines.push(trow,[]);
   });
   saveFile('comparativo-meses-rahra-'+iso(new Date())+'.csv','﻿'+lines.map(l=>l.map(csvQ).join(';')).join('\r\n'),'text/csv;charset=utf-8');
 }
@@ -1263,37 +1276,41 @@ async function savePDF(){
     await saveFile('relatorio-rahra-'+iso(new Date())+'.pdf',blob,'application/pdf');
   }catch(e){console.error(e);toast('Não consegui gerar o PDF. Tente “Imprimir” e escolha Salvar como PDF.');}
 }
-/* PDF do comparativo entre meses: colunas de largura igual, uma por mês (o relatório normal usa
-   trincas Meta/Resultado/% que não fazem sentido aqui, por isso tem sua própria montagem). */
+/* PDF do comparativo entre meses: duas colunas por mês (Meta/Resultado), para mostrar tanto a meta
+   individual de cada consultora quanto a meta da loja (linha Total), lado a lado com o resultado. */
 function pdfMonthsTable(P,mm,k,newPageHdr){
-  const X0=P.M,TW=P.W-2*P.M,c0=130,n=mm.cols.length,cw0=(TW-c0)/Math.max(n,1);
-  const xs=[X0,X0+c0];for(let i=1;i<n;i++)xs.push(xs[xs.length-1]+cw0);
+  const X0=P.M,TW=P.W-2*P.M,c0=110,n=mm.cols.length,per=2,tot=n*per,cw0=(TW-c0)/Math.max(tot,1);
+  const xs=[X0,X0+c0];for(let i=1;i<tot;i++)xs.push(xs[xs.length-1]+cw0);
   const HH=15,RH=15.5,LIM=P.H-P.M-14;
   const head=()=>{
     const y0=P.y;
     P.rect(xs[0],y0,c0,HH*2,'#B23A5B','#ffffff');P.text('Consultora',xs[0]+c0/2,y0+HH+3,8,true,'#ffffff','c',c0-4);
     mm.cols.forEach((c,i)=>{
-      P.rect(xs[i+1],y0,cw0,HH,'#B23A5B','#ffffff');P.text(monthLabel(c.m),xs[i+1]+cw0/2,y0+HH-4,8,true,'#ffffff','c',cw0-4);
-      P.rect(xs[i+1],y0+HH,cw0,HH,'#C4506F','#ffffff');P.text(c.res[k].goal>0?'Meta '+fmtGoal(k,c.res[k].goal):'sem meta',xs[i+1]+cw0/2,y0+2*HH-4,7,true,'#ffffff','c',cw0-4);
+      const x=xs[1+i*per],w=cw0*per;
+      P.rect(x,y0,w,HH,'#B23A5B','#ffffff');P.text(monthLabel(c.m),x+w/2,y0+HH-4,8,true,'#ffffff','c',w-4);
+      P.rect(xs[1+i*per],y0+HH,cw0,HH,'#C4506F','#ffffff');P.text('Meta',xs[1+i*per]+cw0/2,y0+2*HH-4,7,true,'#ffffff','c',cw0-4);
+      P.rect(xs[2+i*per],y0+HH,cw0,HH,'#C4506F','#ffffff');P.text(k==='fat'?'Vendido':'Resultado',xs[2+i*per]+cw0/2,y0+2*HH-4,7,true,'#ffffff','c',cw0-4);
     });
     P.y=y0+HH*2;
   };
   if(P.y+HH*2+RH*2>LIM)newPageHdr();
   head();
-  const row=(name,vals,sts,total)=>{
+  const row=(name,rs,total)=>{
     if(P.y+RH>LIM){newPageHdr();head();}
     const y=P.y;
     P.rect(xs[0],y,c0,RH,total?'#F8ECEF':'#ffffff','#E7C9D2');P.text(name,xs[0]+4,y+RH-4.5,8,true,'#2B2226','l',c0-8);
-    vals.forEach((v,i)=>{
+    rs.forEach((r,i)=>{
+      const xg=xs[1+i*per],xv=xs[2+i*per];
+      P.rect(xg,y,cw0,RH,total?'#F8ECEF':'#ffffff','#E7C9D2');P.text(fmtGoal(k,r.goal),xg+cw0-4,y+RH-4.5,8,total,'#7C6A72','r',cw0-6);
       let bg=total?'#F8ECEF':'#ffffff',fg='#2B2226';
-      if(sts[i]){bg=PDFC[sts[i]][0];fg=PDFC[sts[i]][1];}
-      P.rect(xs[i+1],y,cw0,RH,bg,'#E7C9D2');P.text(v,xs[i+1]+cw0-4,y+RH-4.5,8,true,fg,'r',cw0-6);
+      if(r.st){bg=PDFC[r.st][0];fg=PDFC[r.st][1];}
+      P.rect(xv,y,cw0,RH,bg,'#E7C9D2');P.text(fmt(k,r.val),xv+cw0-4,y+RH-4.5,8,true,fg,'r',cw0-6);
     });
     if(total)cur_line(P,X0,y,TW);
     P.y+=RH;
   };
-  mm.cs.forEach(cons=>row(cons.name,mm.cols.map(c=>fmt(k,monthResFor(c.m,c.ws,cons)[k].val)),mm.cols.map(c=>monthResFor(c.m,c.ws,cons)[k].st),false));
-  row(mm.filtered?'Total (selecionadas)':'Total da loja',mm.cols.map(c=>fmt(k,c.res[k].val)),mm.cols.map(c=>c.res[k].st),true);
+  mm.cs.forEach(cons=>row(cons.name,mm.cols.map(c=>monthResFor(c.m,c.ws,cons)[k]),false));
+  row(mm.filtered?'Total (selecionadas)':'Total da loja',mm.cols.map(c=>c.res[k]),true);
 }
 async function buildMonthsPDF(mm){
   const P=makePDF();
@@ -1535,9 +1552,13 @@ function addWeek(start,end){
   /* Metas de partida: copia da semana anterior de verdade (por data), não da última cadastrada — assim
      um mês retroativo não herda metas de um mês futuro que só foi cadastrado antes dele. */
   const prev=S.weeks.filter(w=>w.end<start).sort(byStart).pop();
-  const w={id:uid(),start:start,end:end,month:monthOf(start,end),tm:S.def.tm,pa:S.def.pa,conv:S.def.conv,goals:{}};
+  /* O mês da semana nova é sempre o mês que está sendo editado (ui.month), nunca recalculado pela
+     data (monthOf pega o mês com mais dias no intervalo de 7 dias): perto da virada do mês isso podia
+     jogar a semana nova para o mês seguinte sem avisar, fazendo duas semanas de meses diferentes
+     caírem no mesmo mês no banco — e sumindo com o comparativo entre meses nos Relatórios. */
+  const w={id:uid(),start:start,end:end,month:ui.month,tm:S.def.tm,pa:S.def.pa,conv:S.def.conv,goals:{}};
   if(prev)S.consultants.filter(c=>c.active).forEach(c=>{if(prev.goals[c.id]>0)w.goals[c.id]=prev.goals[c.id];});
-  S.weeks.push(w);ui.month=w.month;save();render();toast('Semana adicionada: '+wkLabel(w)+'. Ajuste as datas e as metas se precisar.');
+  S.weeks.push(w);save();render();toast('Semana adicionada: '+wkLabel(w)+'. Ajuste as datas e as metas se precisar.');
 }
 /* Dias do mês que sobraram depois da última semana cadastrada (ex.: semanas de 7 em 7 dias deixam de 1 a 6 dias soltos no fim). */
 function monthGap(m){
